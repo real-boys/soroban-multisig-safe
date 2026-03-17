@@ -1,0 +1,191 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  stellarAddress String @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  wallets   Wallet[]
+  sessions  Session[]
+  signatures Signature[]
+
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  refreshToken String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model Wallet {
+  id               String   @id @default(cuid())
+  name             String
+  contractAddress  String   @unique
+  stellarNetwork   String   // 'mainnet', 'testnet', 'futurenet'
+  threshold        Int
+  recoveryAddress  String
+  recoveryDelay    BigInt  // in seconds
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  ownerId      String
+  owner        User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owners       WalletOwner[]
+  transactions Transaction[]
+  recoveries   Recovery[]
+
+  @@map("wallets")
+}
+
+model WalletOwner {
+  id       String @id @default(cuid())
+  walletId String
+  address  String
+  addedAt  DateTime @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, address])
+  @@map("wallet_owners")
+}
+
+model Transaction {
+  id           String   @id @default(cuid())
+  walletId     String
+  transactionId BigInt  // Contract transaction ID
+  destination  String
+  amount       BigInt
+  data         String?  // Hex string for transaction data
+  executed     Boolean  @default(false)
+  signatures   Int      @default(0)
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  executedAt   DateTime?
+
+  // Relations
+  wallet     Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  signatures Signature[]
+
+  @@map("transactions")
+}
+
+model Signature {
+  id            String   @id @default(cuid())
+  transactionId String
+  userId        String
+  signerAddress String
+  signedAt      DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([transactionId, userId])
+  @@map("signatures")
+}
+
+model Recovery {
+  id                   String   @id @default(cuid())
+  walletId             String
+  newRecoveryAddress   String
+  initiatedAt          DateTime @default(now())
+  executeAfter         DateTime
+  executed             Boolean  @default(false)
+  executedAt           DateTime?
+  cancelledAt          DateTime?
+
+  // Relations
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@map("recoveries")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  walletId  String?
+  action    String   // 'CREATE_WALLET', 'ADD_OWNER', 'REMOVE_OWNER', etc.
+  details   Json?    // Additional context
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  walletId  String?
+  type      String   // 'TRANSACTION_PENDING', 'RECOVERY_INITIATED', etc.
+  title     String
+  message   String
+  data      Json?    // Additional notification data
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@map("notifications")
+}
+
+model ApiKey {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  keyHash   String   // Hashed API key
+  scopes    String[] // Array of permissions
+  isActive  Boolean  @default(true)
+  lastUsed  DateTime?
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  @@map("api_keys")
+}
+
+model Webhook {
+  id        String   @id @default(cuid())
+  userId    String
+  walletId  String?
+  url       String
+  secret    String   // For webhook signature verification
+  events    String[] // Array of event types
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("webhooks")
+}
+
+model RateLimit {
+  id        String   @id @default(cuid())
+  identifier String  // IP address or user ID
+  endpoint  String
+  count     Int
+  windowMs  BigInt   // Time window in milliseconds
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@map("rate_limits")
+}

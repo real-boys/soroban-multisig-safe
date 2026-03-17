@@ -1,0 +1,91 @@
+{
+  "name": "stellar-multisig-safe",
+  "version": "1.0.0",
+  "description": "Multi-signature wallet with time-lock recovery built on Stellar",
+  "main": "index.js",
+  "scripts": {
+    "install:all": "npm install && npm run install:contracts && npm run install:backend && npm run install:frontend",
+    "install:contracts": "cd contracts && cargo build",
+    "install:backend": "cd backend && npm install",
+    "install:frontend": "cd frontend && npm install",
+    "dev": "concurrently \"npm run contract:dev\" \"npm run backend:dev\" \"npm run frontend:dev\"",
+    "build": "npm run contract:build && npm run backend:build && npm run frontend:build",
+    "test": "npm run contract:test && npm run backend:test && npm run frontend:test",
+    "lint": "npm run contract:lint && npm run backend:lint && npm run frontend:lint",
+    "clean": "npm run contract:clean && npm run backend:clean && npm run frontend:clean",
+    "contract:build": "cd contracts/soroban && cargo build --target wasm32-unknown-unknown --release",
+    "contract:test": "cd contracts/soroban && cargo test",
+    "contract:deploy": "cd contracts && soroban contract deploy --wasm target/wasm32-unknown-unknown/release/multisig_safe.wasm",
+    "contract:optimize": "cd contracts/soroban && cargo build --target wasm32-unknown-unknown --release && wasm-opt -Oz target/wasm32-unknown-unknown/release/multisig_safe.wasm -o target/wasm32-unknown-unknown/release/multisig_safe_opt.wasm",
+    "contract:lint": "cd contracts/soroban && cargo clippy -- -D warnings",
+    "contract:clean": "cd contracts/soroban && cargo clean",
+    "contract:dev": "cd contracts/soroban && cargo watch -x build",
+    "backend:dev": "cd backend && npm run dev",
+    "backend:build": "cd backend && npm run build",
+    "backend:test": "cd backend && npm run test",
+    "backend:lint": "cd backend && npm run lint",
+    "backend:clean": "cd backend && rm -rf node_modules dist",
+    "frontend:dev": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "frontend:test": "cd frontend && npm run test",
+    "frontend:lint": "cd frontend && npm run lint",
+    "frontend:clean": "cd frontend && rm -rf node_modules dist build",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "stellar:local": "docker run -d --name stellar-local -p 8000:8000 stellar/quickstart:latest",
+    "stellar:testnet": "soroban config network --global futurenet --rpc-url https://rpc.fUTUREnet.stellar.org:443",
+    "setup": "npm run install:all && npm run stellar:local && npm run contract:build"
+  },
+  "keywords": [
+    "stellar",
+    "soroban",
+    "multisig",
+    "multi-signature",
+    "wallet",
+    "blockchain",
+    "recovery",
+    "time-lock",
+    "security",
+    "rust",
+    "react",
+    "nodejs"
+  ],
+  "author": "Stellar Multi-Sig Safe Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/stellar-multisig-safe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/stellar-multisig-safe/issues"
+  },
+  "homepage": "https://github.com/your-org/stellar-multisig-safe#readme",
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "husky": "^8.0.3",
+    "lint-staged": "^15.2.0"
+  },
+  "husky": {
+    "hooks": {
+      "pre-commit": "lint-staged"
+    }
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{rs}": [
+      "cargo clippy --fix",
+      "cargo fmt"
+    ],
+    "*.{json,md}": [
+      "prettier --write"
+    ]
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ]
+}
