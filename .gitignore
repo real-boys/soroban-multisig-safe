@@ -134,8 +134,8 @@ playwright-report/
 test-results.xml
 
 # Soroban specific
+target/
 *.wasm
-soroban/
 
 # Stellar specific
 *.ledger

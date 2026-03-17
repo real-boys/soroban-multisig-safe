@@ -1,0 +1,25 @@
+[package]
+name = "multisig-safe"
+version = "1.0.0"
+edition = "2021"
+description = "Multi-signature wallet with time-lock recovery for Stellar"
+authors = ["Stellar Multi-Sig Safe Team"]
+license = "MIT"
+repository = "https://github.com/your-org/stellar-multisig-safe"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+soroban-token-sdk = { workspace = true }
+stellar-xdr = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]
