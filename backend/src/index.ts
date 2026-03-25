@@ -17,6 +17,7 @@ import { connectRedis } from '@/config/redis';
 import authRoutes from '@/routes/auth';
 import walletRoutes from '@/routes/wallet';
 import transactionRoutes from '@/routes/transaction';
+import userRoutes from '@/routes/user';
 import recoveryRoutes from '@/routes/recovery';
 import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
@@ -57,6 +58,7 @@ app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/transactions', transactionRoutes);
+app.use('/api/user', userRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
 

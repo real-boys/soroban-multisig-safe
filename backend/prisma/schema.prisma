@@ -20,11 +20,63 @@ model User {
   updatedAt DateTime @updatedAt
 
   // Relations
-  wallets   Wallet[]
-  sessions  Session[]
-  signatures Signature[]
+  wallets        Wallet[]
+  sessions       Session[]
+  signatures     Signature[]
+  comments       Comment[]
+  preferences    UserPreference?
+  walletSettings UserWalletSettings[]
+  invitations    Invitation[] @relation("ReceivedInvitations")
+  sentInvites    Invitation[] @relation("SentInvitations")
 
   @@map("users")
+}
+
+model UserPreference {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  emailNotifications    Boolean  @default(true)
+  pushNotifications     Boolean  @default(true)
+  transactionAlerts     Boolean  @default(true)
+  theme                 String   @default("dark") // 'light', 'dark', 'system'
+  language              String   @default("en")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+model UserWalletSettings {
+  id        String   @id @default(cuid())
+  userId    String
+  walletId  String
+  nickname  String?  // Requirement: Store "Nicknames" for wallets
+  isFavorite Boolean @default(false)
+  isPinned   Boolean @default(false)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, walletId])
+  @@map("user_wallet_settings")
+}
+
+model Invitation {
+  id              String   @id @default(cuid())
+  walletId        String
+  inviterId       String
+  inviteeAddress  String   // Stellar address being invited
+  inviteeId       String?  // Linked User ID if they exist
+  status          String   @default("PENDING") // 'PENDING', 'ACCEPTED', 'DECLINED', 'EXPIRED'
+  role            String   @default("OWNER")
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime?
+
+  wallet  Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  inviter User   @relation(fields: [inviterId], references: [id], onDelete: Cascade, name: "SentInvitations")
+  invitee User?  @relation(fields: [inviteeId], references: [id], onDelete: SetNull, name: "ReceivedInvitations")
+
+  @@map("invitations")
 }
 
 model Session {
