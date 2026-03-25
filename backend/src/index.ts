@@ -18,10 +18,12 @@ import authRoutes from '@/routes/auth';
 import walletRoutes from '@/routes/wallet';
 import transactionRoutes from '@/routes/transaction';
 import recoveryRoutes from '@/routes/recovery';
+import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
+import { CronService } from '@/services/CronService';
 
 dotenv.config();
 
@@ -56,9 +58,14 @@ app.use('/api/auth', authRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/recovery', recoveryRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // Socket.io setup
 setupSocketHandlers(io);
+
+// Initialize cron service
+const cronService = new CronService();
+cronService.start();
 
 // Error handling middleware
 app.use(errorHandler);
