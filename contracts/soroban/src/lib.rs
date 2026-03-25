@@ -123,12 +123,14 @@ impl MultisigSafe {
     /// Submit a new transaction for approval
     pub fn submit_transaction(
         env: Env,
+        caller: Address,
         destination: Address,
         amount: i128,
         data: Bytes,
         expires_at: u64,
     ) -> Result<u64, MultisigError> {
-        Self::require_owner(&env, env.current_contract_address())?;
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
 
         let tx_count: u64 = env.storage().instance().get(&TRANSACTION_COUNT).unwrap_or(0);
         let transaction_id = tx_count + 1;
@@ -150,16 +152,19 @@ impl MultisigSafe {
         env.storage().instance().set(&TRANSACTION_COUNT, &transaction_id);
 
         // Auto-sign if submitter is an owner
-        Self::sign_transaction(env, transaction_id)?;
+        Self::sign_transaction_internal(&env, transaction_id, caller.clone())?;
 
         Ok(transaction_id)
     }
 
     /// Sign a transaction
-    pub fn sign_transaction(env: Env, transaction_id: u64) -> Result<(), MultisigError> {
-        let caller = env.current_contract_address();
-        Self::require_owner(&env, caller.clone())?;
+    pub fn sign_transaction(env: Env, caller: Address, transaction_id: u64) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+        Self::sign_transaction_internal(&env, transaction_id, caller)
+    }
 
+    fn sign_transaction_internal(env: &Env, transaction_id: u64, caller: Address) -> Result<(), MultisigError> {
         let mut transaction: Transaction = env
             .storage()
             .instance()
@@ -193,7 +198,7 @@ impl MultisigSafe {
         // Auto-execute if threshold reached
         let threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
         if transaction.signatures >= threshold {
-            Self::execute_transaction(env, transaction_id)?;
+            Self::execute_transaction(env.clone(), transaction_id)?;
         }
 
         Ok(())
@@ -223,6 +228,7 @@ impl MultisigSafe {
 
         // Execute transaction
         if transaction.amount > 0 {
+            // Transfer logic (assumes contract holds tokens)
             let token_client = token::Client::new(&env, &transaction.destination);
             token_client.transfer(
                 &env.current_contract_address(),
@@ -241,8 +247,9 @@ impl MultisigSafe {
     }
 
     /// Add a new owner
-    pub fn add_owner(env: Env, new_owner: Address) -> Result<(), MultisigError> {
-        Self::require_owner(&env, env.current_contract_address())?;
+    pub fn add_owner(env: Env, caller: Address, new_owner: Address) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
 
         let mut owners: Vec<Address> = env
             .storage()
@@ -265,8 +272,9 @@ impl MultisigSafe {
     }
 
     /// Remove an owner
-    pub fn remove_owner(env: Env, owner_to_remove: Address) -> Result<(), MultisigError> {
-        Self::require_owner(&env, env.current_contract_address())?;
+    pub fn remove_owner(env: Env, caller: Address, owner_to_remove: Address) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
 
         let mut owners: Vec<Address> = env
             .storage()
@@ -295,8 +303,9 @@ impl MultisigSafe {
     }
 
     /// Change the signature threshold
-    pub fn change_threshold(env: Env, new_threshold: u32) -> Result<(), MultisigError> {
-        Self::require_owner(&env, env.current_contract_address())?;
+    pub fn change_threshold(env: Env, caller: Address, new_threshold: u32) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
 
         let owners: Vec<Address> = env
             .storage()
@@ -316,9 +325,11 @@ impl MultisigSafe {
     /// Initiate recovery process
     pub fn initiate_recovery(
         env: Env,
+        caller: Address,
         new_recovery_address: Address,
     ) -> Result<(), MultisigError> {
-        Self::require_owner(&env, env.current_contract_address())?;
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
 
         // Check if recovery is already in progress
         if env.storage().instance().has(&RECOVERY_REQUEST) {
@@ -366,8 +377,9 @@ impl MultisigSafe {
     }
 
     /// Cancel ongoing recovery
-    pub fn cancel_recovery(env: Env) -> Result<(), MultisigError> {
-        Self::require_owner(&env, env.current_contract_address())?;
+    pub fn cancel_recovery(env: Env, caller: Address) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
 
         if !env.storage().instance().has(&RECOVERY_REQUEST) {
             return Err(MultisigError::RecoveryNotInitiated);
@@ -381,11 +393,13 @@ impl MultisigSafe {
     /// Emergency recovery by recovery address
     pub fn emergency_recovery(
         env: Env,
+        caller: Address,
         new_owners: Vec<Address>,
         new_threshold: u32,
         new_recovery_address: Address,
     ) -> Result<(), MultisigError> {
-        let caller = env.current_contract_address();
+        caller.require_auth();
+        
         let recovery_address: Address = env
             .storage()
             .instance()
@@ -464,18 +478,56 @@ impl MultisigSafe {
             .has(&(SIGNATURES, transaction_id, signer)))
     }
 
-    /// Helper function to check if caller is an owner
-    fn require_owner(env: &Env, caller: Address) -> Result<(), MultisigError> {
+    /// Helper function to check if address is an owner
+    fn require_owner(env: &Env, address: &Address) -> Result<(), MultisigError> {
         let owners: Vec<Address> = env
             .storage()
             .instance()
             .get(&OWNERS)
             .unwrap_or_default();
         
-        if !owners.contains(&caller) {
+        if !owners.contains(address) {
             return Err(MultisigError::Unauthorized);
         }
         
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+
+    #[test]
+    fn test_time_lock_properties() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400; // 24h
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                recovery_delay,
+            ).unwrap();
+        });
+
+        // Property 1: Recovery cannot be executed immediately after initiation
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::initiate_recovery(env.clone(), owner.clone(), Address::generate(&env)).unwrap();
+            let result = MultisigSafe::execute_recovery(env.clone());
+            assert_eq!(result, Err(MultisigError::RecoveryDelayNotPassed));
+        });
+
+        // Property 2: Recovery can be executed exactly after delay
+        env.ledger().with_mut(|li| li.timestamp += recovery_delay + 1);
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::execute_recovery(env.clone()).unwrap();
+        });
     }
 }
