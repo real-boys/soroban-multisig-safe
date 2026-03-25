@@ -3,6 +3,7 @@ import { body, param, query } from 'express-validator';
 import { TransactionController } from '@/controllers/TransactionController';
 import { authMiddleware } from '@/middleware/auth';
 import { validateRequest } from '@/middleware/validation';
+import { signatureRateLimiter } from '@/middleware/rateLimiter';
 
 const router = Router();
 const transactionController = new TransactionController();
@@ -98,6 +99,21 @@ router.delete(
   ],
   validateRequest,
   transactionController.deleteTransaction.bind(transactionController)
+);
+
+/**
+ * @route POST /api/transactions/:transactionId/intent-to-sign
+ * @desc Record a signature fragment and potentially relay (signers only)
+ */
+router.post(
+  '/:transactionId/intent-to-sign',
+  [
+    signatureRateLimiter,
+    param('transactionId').isUUID().withMessage('Invalid transaction ID'),
+    body('signature').optional().isString().withMessage('Signature must be a string'),
+  ],
+  validateRequest,
+  transactionController.intentToSign.bind(transactionController)
 );
 
 export default router;

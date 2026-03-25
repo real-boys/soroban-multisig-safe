@@ -13,3 +13,15 @@ export const rateLimiter = rateLimit({
     }
   }
 });
+
+export const signatureRateLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 10, // Limit each IP to 10 signature intents per minute
+  message: {
+    success: false,
+    error: {
+      code: 'TOO_MANY_SIGNATURE_ATTEMPTS',
+      message: 'Too many signature attempts, please try again after a minute'
+    }
+  }
+});

@@ -101,4 +101,68 @@ export class StellarService {
   ): Promise<void> {
     logger.info(`Updating recovery settings for contract ${contractAddress}`);
   }
+
+  /**
+   * Submit a finalized multisig transaction to the network
+   */
+  async submitMultisigTransaction(
+    contractAddress: string,
+    transactionRecord: any,
+    signatureFragments: string[]
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
+    try {
+      logger.info(`Relaying multisig transaction to contract ${contractAddress}`);
+
+      // In a real implementation:
+      // 1. Build the Soroban transaction that calls 'execute_transaction'
+      // 2. Add signature fragments (if off-chain aggregation is used)
+      // 3. Or check on-chain signatures and just trigger 'execute'
+      
+      // Mocking submission result
+      const isFeeSponsored = process.env.ENABLE_FEE_SPONSORSHIP === 'true';
+      
+      if (isFeeSponsored) {
+        return this.feeBumpTransaction(contractAddress, transactionRecord);
+      }
+
+      // Simple mock success
+      const txHash = 'TX' + Math.random().toString(36).substring(2, 60).toUpperCase();
+      return { success: true, txHash };
+
+    } catch (error: any) {
+      logger.error('Error in submitMultisigTransaction:', error);
+      
+      // Handle "TX_BAD_AUTH_EXTRA" and others
+      const errorMessage = error.message || 'Unknown network error';
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Wrap transaction in a Fee Bump if sponsored
+   */
+  async feeBumpTransaction(
+    contractAddress: string,
+    transactionRecord: any
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
+    try {
+      logger.info(`Relaying version-bump/fee-bump transaction for ${contractAddress}`);
+      
+      const sponsorSecret = process.env.SPONSOR_SECRET_KEY;
+      if (!sponsorSecret) {
+        throw new Error('Sponsor secret key not configured');
+      }
+
+      const sponsorKeypair = Keypair.fromSecret(sponsorSecret);
+      
+      // Real code would use TransactionBuilder.feeBump(...)
+      // here we mock the txHash after a successful bump
+      const txHash = 'FEEBUMP' + Math.random().toString(36).substring(2, 53).toUpperCase();
+      
+      return { success: true, txHash };
+    } catch (error: any) {
+      logger.error('Error in feeBumpTransaction:', error);
+      return { success: false, error: 'FEE_BUMP_FAILED: ' + error.message };
+    }
+  }
 }

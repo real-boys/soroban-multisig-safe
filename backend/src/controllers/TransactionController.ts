@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { TransactionService } from '@/services/TransactionService';
 import { StellarService } from '@/services/StellarService';
+import { RelayService } from '@/services/RelayService';
 import { ApiResponse } from '@/types/api';
 import { CreateTransactionRequest, AddCommentRequest, UpdateTransactionRequest } from '@/types/transaction';
 import { validationResult } from 'express-validator';
@@ -8,10 +9,12 @@ import { validationResult } from 'express-validator';
 export class TransactionController {
   private transactionService: TransactionService;
   private stellarService: StellarService;
+  private relayService: RelayService;
 
   constructor() {
     this.transactionService = new TransactionService();
     this.stellarService = new StellarService();
+    this.relayService = new RelayService();
   }
 
   /**
@@ -148,6 +151,45 @@ export class TransactionController {
         error: {
           code: 'COMMENT_ADD_FAILED',
           message: 'Failed to add comment',
+        },
+      });
+    }
+  }
+
+  /**
+   * Record intent to sign and potentially relay the transaction
+   */
+  async intentToSign(req: Request, res: Response): Promise<void> {
+    try {
+      const { transactionId } = req.params;
+      const { signature } = req.body;
+      const userId = req.user!.id;
+      const signerAddress = req.user!.stellarAddress;
+
+      // Verify signers only (could also check if they are owner of associated wallet)
+      // but RelayService already has checkAndRelayTransaction threshold logic
+      
+      const recordedSignature = await this.relayService.recordIntentToSign(
+        transactionId,
+        userId,
+        signerAddress,
+        signature
+      );
+
+      const response: ApiResponse = {
+        success: true,
+        data: recordedSignature,
+        message: 'Intent to sign recorded. Relaying if threshold is met.',
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      console.error('Error in intentToSign:', error);
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'INTENT_TO_SIGN_FAILED',
+          message: 'Failed to record signature intent',
         },
       });
     }
