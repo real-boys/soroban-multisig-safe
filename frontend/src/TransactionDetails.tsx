@@ -31,6 +31,10 @@ const TransactionDetails: React.FC = () => {
   const progressPercentage = (transaction.signatures / transaction.threshold) * 100;
   const isPending = transaction.status === 'pending';
 
+  // Check if the currently connected user has already signed
+  // Mock scenario: If no wallet connected, they obviously haven't signed
+  const userHasSigned = publicKey ? transaction.signedBy.includes(publicKey) : false;
+
   const handleApprove = async () => {
     if (!kit || !publicKey) return alert('Please connect your wallet.');
     try {
@@ -92,10 +96,31 @@ const TransactionDetails: React.FC = () => {
           </Box>
 
           {isPending && (
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-              <Button variant="contained" color="success" onClick={handleApprove} fullWidth>Approve / Sign</Button>
-              <Button variant="outlined" color="error" onClick={handleReject} fullWidth>Reject / Cancel</Button>
-            </Stack>
+            < {!userHasSigned && (
+                <Typography variant="body2" color="warning.main" sx={{ mb: 2, fontWeight: 'bold' }}>
+                  ⚠️ This transaction requires your signature!
+                </Typography>
+              )}
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                <Button 
+                  variant="contained" 
+                  color="success" 
+                  onClick={handleApprove} 
+                  fullWidth
+                  sx={!userHasSigned ? {
+                    animation: 'pulse 2s infinite',
+                    '@keyframes pulse': {
+                      '0%': { boxShadow: '0 0 0 0 rgba(46, 125, 50, 0.7)' },
+                      '70%': { boxShadow: '0 0 0 10px rgba(46, 125, 50, 0)' },
+                      '100%': { boxShadow: '0 0 0 0 rgba(46, 125, 50, 0)' },
+                    }
+                  } : {}}
+                >
+                  {userHasSigned ? 'Sign Again (Add Weight)' : 'Approve / Sign'}
+                </Button>
+                <Button variant="outlined" color="error" onClick={handleReject} fullWidth>Reject / Cancel</Button>
+              </Stack>
+            </>
           )}
         </CardContent>
       </Card>

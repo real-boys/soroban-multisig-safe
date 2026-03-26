@@ -5,6 +5,7 @@ import { TransactionProposal } from '../types/transaction';
 const MOCK_TRANSACTIONS: TransactionProposal[] = [
   {
     id: 'prop-1',
+    safeId: 'safe-1',
     destination: 'GBX...7A2',
     amount: '5000',
     title: 'Monthly Server Costs',
@@ -15,9 +16,11 @@ const MOCK_TRANSACTIONS: TransactionProposal[] = [
     signatures: 2,
     threshold: 3,
     creator: 'GAC...9B1',
+    signedBy: ['GAC...9B1', 'GBX...7A2'],
   },
   {
     id: 'prop-2',
+    safeId: 'safe-1',
     destination: 'GDF...3Z9',
     amount: '12000',
     title: 'Marketing Campaign',
@@ -28,9 +31,11 @@ const MOCK_TRANSACTIONS: TransactionProposal[] = [
     signatures: 1,
     threshold: 3,
     creator: 'GBX...7A2',
+    signedBy: ['GBX...7A2'],
   },
   {
     id: 'prop-3',
+    safeId: 'safe-2',
     destination: 'GAC...9B1',
     amount: '250',
     title: 'Reimbursement',
@@ -41,6 +46,7 @@ const MOCK_TRANSACTIONS: TransactionProposal[] = [
     signatures: 3,
     threshold: 3,
     creator: 'GDF...3Z9',
+    signedBy: ['GDF...3Z9', 'GAC...9B1', 'GBX...7A2'],
   },
 ];
 
