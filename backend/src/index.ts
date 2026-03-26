@@ -22,10 +22,12 @@ import recoveryRoutes from '@/routes/recovery';
 import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
 import tokenRoutes from '@/routes/token';
+import eventIndexerRoutes from '@/routes/eventIndexer';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
 import { CronService } from '@/services/CronService';
+import { EventIndexerService } from '@/services/EventIndexerService';
 
 dotenv.config();
 
@@ -63,13 +65,17 @@ app.use('/api/user', userRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/token', tokenRoutes);
+app.use('/api/events', eventIndexerRoutes);
 
 // Socket.io setup
 setupSocketHandlers(io);
 
-// Initialize cron service
+// Initialize services
 const cronService = new CronService();
 cronService.start();
+
+const eventIndexerService = new EventIndexerService();
+eventIndexerService.start();
 
 // Error handling middleware
 app.use(errorHandler);

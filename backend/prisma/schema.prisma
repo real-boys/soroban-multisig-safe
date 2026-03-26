@@ -349,3 +349,29 @@ model SignerChangeProposal {
   @@index([walletId, status])
   @@map("signer_change_proposals")
 }
+
+model IndexedEvent {
+  id            String   @id @default(cuid())
+  contractId    String
+  eventType     String
+  ledger        BigInt
+  transactionHash String
+  timestamp     DateTime
+  data          Json
+  topics        String[] // Indexed topics for filtering
+  
+  @@index([contractId, ledger])
+  @@index([contractId, eventType])
+  @@index([topics])
+  @@map("indexed_events")
+}
+
+model EventIndexerState {
+  id              String   @id @default(cuid())
+  network         String   @unique // e.g., 'futurenet', 'mainnet'
+  lastLedger      BigInt
+  lastSync        DateTime @default(now())
+  isHealthy       Boolean  @default(true)
+  
+  @@map("event_indexer_state")
+}
