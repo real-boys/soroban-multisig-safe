@@ -21,6 +21,7 @@ import userRoutes from '@/routes/user';
 import recoveryRoutes from '@/routes/recovery';
 import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
+import tokenRoutes from '@/routes/token';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
@@ -61,6 +62,7 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/token', tokenRoutes);
 
 // Socket.io setup
 setupSocketHandlers(io);

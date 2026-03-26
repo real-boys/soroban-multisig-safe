@@ -389,6 +389,48 @@ export const authService = {
     const response = await api.get('/auth/me');
     return response.data.data;
   },
+
+  /**
+   * Get token balances for a wallet
+   */
+  async getTokenBalances(walletAddress: string): Promise<any> {
+    const response = await api.get(`/token/balances/${walletAddress}`);
+    return response.data;
+  },
+
+  /**
+   * Get portfolio value
+   */
+  async getPortfolioValue(walletAddress: string): Promise<any> {
+    const response = await api.get(`/token/portfolio/${walletAddress}`);
+    return response.data;
+  },
+
+  /**
+   * Discover custom tokens
+   */
+  async discoverCustomTokens(walletAddress: string): Promise<any> {
+    const response = await api.get(`/token/discover/${walletAddress}`);
+    return response.data;
+  },
+
+  /**
+   * Get transaction history for tokens
+   */
+  async getTokenTransactionHistory(
+    walletAddress: string,
+    page?: number,
+    limit?: number,
+    type?: string
+  ): Promise<any> {
+    const params = new URLSearchParams();
+    if (page) params.append('page', page.toString());
+    if (limit) params.append('limit', limit.toString());
+    if (type) params.append('type', type);
+    
+    const response = await api.get(`/token/transactions/${walletAddress}?${params.toString()}`);
+    return response.data;
+  },
 };
 
 export default api;

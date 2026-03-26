@@ -260,3 +260,85 @@ model RateLimit {
 
   @@map("rate_limits")
 }
+
+model TokenBalance {
+  id          String   @id @default(cuid())
+  walletId    String
+  contractId  String   // Token contract address
+  symbol      String   // e.g., XLM, USDC
+  name        String   // Full token name
+  decimals    Int
+  balance     BigInt
+  priceUsd    Float?   // Current USD price
+  iconUrl     String?  // Token icon URL
+  isVerified  Boolean  @default(false) // Whether token is verified
+  lastUpdated DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, contractId])
+  @@map("token_balances")
+}
+
+model TransactionHistory {
+  id          String   @id @default(cuid())
+  walletId    String
+  txHash      String   @unique
+  type        String   // 'TRANSFER_IN', 'TRANSFER_OUT', 'SWAP', etc.
+  token       String   // Token symbol
+  amount      BigInt
+  from        String
+  to          String
+  timestamp   DateTime
+  blockNumber BigInt?
+  data        Json?    // Additional transaction data
+  createdAt   DateTime @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, timestamp])
+  @@index([walletId, type])
+  @@map("transaction_history")
+}
+
+model TokenBalance {
+  id          String   @id @default(cuid())
+  walletId    String
+  contractId  String   // Token contract address
+  symbol      String   // e.g., XLM, USDC
+  name        String   // Full token name
+  decimals    Int
+  balance     BigInt
+  priceUsd    Float?   // Current USD price
+  iconUrl     String?  // Token icon URL
+  isVerified  Boolean  @default(false) // Whether token is verified
+  lastUpdated DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, contractId])
+  @@map("token_balances")
+}
+
+model TransactionHistory {
+  id          String   @id @default(cuid())
+  walletId    String
+  txHash      String   @unique
+  type        String   // 'TRANSFER_IN', 'TRANSFER_OUT', 'SWAP', etc.
+  token       String   // Token symbol
+  amount      BigInt
+  from        String
+  to          String
+  timestamp   DateTime
+  blockNumber BigInt?
+  data        Json?    // Additional transaction data
+  createdAt   DateTime @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, timestamp])
+  @@index([walletId, type])
+  @@map("transaction_history")
+}
