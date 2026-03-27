@@ -122,6 +122,8 @@ const FREEZE_UNTIL: Symbol = symbol_short!("FREEZE_UNTIL");
 const FREEZE_REASON: Symbol = symbol_short!("FREEZE_RSN");
 const LAST_HEARTBEAT: Symbol = symbol_short!("LAST_HRTBT");
 const RECOVERY_PATH_ADDRESS: Symbol = symbol_short!("REC_PATH_ADDR");
+const LAST_ACTIVE_LEDGER: Symbol = symbol_short!("LAST_ACTIVE");
+const RECOVERY_KEY: Symbol = symbol_short!("RECOVERY_KEY");
 
 // Event topics
 const UPGRADE_EVENT: Symbol = symbol_short!("UPGRADE");
@@ -140,6 +142,7 @@ const MIN_FREEZE_DURATION: u64 = 3600; // 1 hour in seconds
 const MAX_FREEZE_DURATION: u64 = 2592000; // 30 days in seconds
 const FREEZE_THRESHOLD_RATIO: u32 = 3; // Freeze requires 1/3 of normal threshold
 const RECOVERY_PERIOD: u64 = 2592000; // 30 days in seconds (time-lock period)
+const TIME_LOCK_PERIOD: u64 = 15552000; // 180 days in ledgers (6 months)
 
 #[contract]
 pub struct MultisigSafe;
@@ -154,6 +157,7 @@ impl MultisigSafe {
         recovery_address: Address,
         recovery_delay: u64,
         recovery_path_address: Address,
+        recovery_key: Address,
     ) -> Result<(), MultisigError> {
         if owners.is_empty() {
             return Err(MultisigError::InvalidThreshold);
@@ -191,6 +195,7 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&RECOVERY_PATH_ADDRESS, &recovery_path_address);
+        env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
         env.storage().instance().set(&TRANSACTION_COUNT, &0u64);
 
         // Initialize rent balance tracking
@@ -203,6 +208,10 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+        // Initialize time-lock recovery tracking
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         // Set contract version for migration tracking
         env.storage()
@@ -376,6 +385,10 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+        // Reset activity timer on successful transaction execution
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         Ok(())
     }
@@ -591,6 +604,8 @@ impl MultisigSafe {
 
     /// Heartbeat function to reset the time-lock timer
     /// Can be called by any primary owner to prove activity
+    /// Heartbeat function to reset the time-lock timer without moving funds
+    /// Can be called by any owner to prove activity
     pub fn heartbeat(env: Env, caller: Address) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
@@ -605,6 +620,10 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+        // Update last activity ledger
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         Ok(())
     }
@@ -634,6 +653,8 @@ impl MultisigSafe {
 
     /// Time-lock recovery function that activates after RECOVERY_PERIOD
     /// Recovery address gains master weight to reset signers after period expires
+    /// Time-lock recovery function that activates after inactivity period
+    /// Can only be called by the recovery key after time-lock period expires
     pub fn time_lock_recovery(
         env: Env,
         caller: Address,
@@ -664,6 +685,30 @@ impl MultisigSafe {
         let current_time = env.ledger().timestamp();
 
         if current_time.saturating_sub(last_heartbeat) < RECOVERY_PERIOD {
+        new_recovery_key: Address,
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+
+        // Verify caller is the recovery key
+        let recovery_key: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_KEY)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        if caller != recovery_key {
+            return Err(MultisigError::Unauthorized);
+        }
+
+        // Check if time-lock period has passed
+        let last_active: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_ACTIVE_LEDGER)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_ledger = env.ledger().sequence();
+
+        if current_ledger.saturating_sub(last_active) < TIME_LOCK_PERIOD as u32 {
             return Err(MultisigError::RecoveryDelayNotPassed);
         }
 
@@ -690,6 +735,12 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+            .set(&RECOVERY_KEY, &new_recovery_key);
+
+        // Reset activity timer
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         // Clear any ongoing recovery
         env.storage().instance().remove(&RECOVERY_REQUEST);
@@ -1374,6 +1425,34 @@ impl MultisigSafe {
         Ok((last_extension, remaining_ttl, rent_balance))
     }
 
+    /// Get time-lock recovery status information
+    pub fn get_time_lock_status(env: Env) -> Result<(u32, u32, bool, Address), MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let last_active: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_ACTIVE_LEDGER)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_active = current_ledger.saturating_sub(last_active);
+        let is_recovery_available = ledgers_since_active >= TIME_LOCK_PERIOD as u32;
+
+        let recovery_key: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_KEY)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        Ok((
+            last_active,
+            ledgers_since_active,
+            is_recovery_available,
+            recovery_key,
+        ))
+    }
+
     /// Store data in persistent storage with automatic TTL management
     pub fn store_persistent_data(
         env: Env,
@@ -1435,6 +1514,7 @@ mod test {
                 recovery_address.clone(),
                 recovery_delay,
                 Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
         });
@@ -1470,6 +1550,7 @@ mod test {
                 recovery_address.clone(),
                 86400,
                 Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1497,6 +1578,7 @@ mod test {
                 recovery_address.clone(),
                 86400,
                 Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1525,6 +1607,7 @@ mod test {
                 recovery_address.clone(),
                 86400,
                 Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1560,6 +1643,7 @@ mod test {
                 recovery_address.clone(),
                 86400,
                 Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
