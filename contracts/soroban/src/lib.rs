@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, env, panic, symbol_short,
-    token, Address, Bytes, Env, IntoVal, Symbol, Map, Vec,
+    contract, contracterror, contractimpl, contracttype, env, panic, symbol_short, token, Address,
+    Bytes, Env, IntoVal, Map, Symbol, Vec,
 };
 
 use thiserror::Error;
@@ -55,6 +55,18 @@ pub enum MultisigError {
     FreezePeriodNotExpired = 22,
     /// Invalid freeze duration
     InvalidFreezeDuration = 23,
+    /// Proposal already exists
+    ProposalAlreadyExists = 24,
+    /// Proposal does not exist
+    ProposalDoesNotExist = 25,
+    /// Proposal already expired
+    ProposalExpired = 26,
+    /// Proposal already executed
+    ProposalAlreadyExecuted = 27,
+    /// Already voted on proposal
+    AlreadyVoted = 28,
+    /// Invalid proposal duration
+    InvalidProposalDuration = 29,
 }
 
 #[contracttype]
@@ -103,6 +115,55 @@ pub struct UnfreezeEvent {
     pub reason: Bytes,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub proposal_id: u64,
+    pub destination: Address,
+    pub amount: i128,
+    pub asset: Address,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub votes: u32,
+    pub required_votes: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCreatedEvent {
+    pub proposal_id: u64,
+    pub destination: Address,
+    pub amount: i128,
+    pub asset: Address,
+    pub created_by: Address,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteCastEvent {
+    pub proposal_id: u64,
+    pub voter: Address,
+    pub voted_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalExecutedEvent {
+    pub proposal_id: u64,
+    pub executed_by: Address,
+    pub executed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalExpiredEvent {
+    pub proposal_id: u64,
+    pub expired_at: u64,
+}
+
 // Storage keys
 const OWNERS: Symbol = symbol_short!("OWNERS");
 const THRESHOLD: Symbol = symbol_short!("THRESHLD");
@@ -120,11 +181,19 @@ const UPGRADE_STATE: Symbol = symbol_short!("UPG_STATE");
 const IS_FROZEN: Symbol = symbol_short!("IS_FROZEN");
 const FREEZE_UNTIL: Symbol = symbol_short!("FREEZE_UNTIL");
 const FREEZE_REASON: Symbol = symbol_short!("FREEZE_RSN");
+const PROPOSAL_COUNT: Symbol = symbol_short!("PROP_COUNT");
+const PROPOSALS: Symbol = symbol_short!("PROPOSALS");
+const PROPOSAL_VOTES: Symbol = symbol_short!("PROP_VOTES");
+const CLEANUP_THRESHOLD: u64 = 100; // Clean up after 100 expired proposals
 
 // Event topics
 const UPGRADE_EVENT: Symbol = symbol_short!("UPGRADE");
 const FREEZE_EVENT: Symbol = symbol_short!("FREEZE");
 const UNFREEZE_EVENT: Symbol = symbol_short!("UNFREEZE");
+const PROPOSAL_CREATED_EVENT: Symbol = symbol_short!("PROP_CREAT");
+const VOTE_CAST_EVENT: Symbol = symbol_short!("VOTE_CAST");
+const PROPOSAL_EXECUTED_EVENT: Symbol = symbol_short!("PROP_EXEC");
+const PROPOSAL_EXPIRED_EVENT: Symbol = symbol_short!("PROP_EXPIR");
 
 // Constants for TTL management
 const DEFAULT_INSTANCE_TTL: u32 = 15552000; // 180 days in ledgers
@@ -137,6 +206,8 @@ const CURRENT_VERSION: u32 = 1; // Current contract version
 const MIN_FREEZE_DURATION: u64 = 3600; // 1 hour in seconds
 const MAX_FREEZE_DURATION: u64 = 2592000; // 30 days in seconds
 const FREEZE_THRESHOLD_RATIO: u32 = 3; // Freeze requires 1/3 of normal threshold
+const MIN_PROPOSAL_DURATION: u64 = 3600; // 1 hour in seconds
+const MAX_PROPOSAL_DURATION: u64 = 2592000; // 30 days in seconds
 
 #[contract]
 pub struct MultisigSafe;
@@ -154,15 +225,15 @@ impl MultisigSafe {
         if owners.is_empty() {
             return Err(MultisigError::InvalidThreshold);
         }
-        
+
         if threshold == 0 || threshold > owners.len() as u32 {
             return Err(MultisigError::InvalidThreshold);
         }
-        
+
         if owners.len() as u32 > MAX_OWNERS {
             return Err(MultisigError::MaximumOwnersExceeded);
         }
-        
+
         if recovery_delay < MIN_RECOVERY_DELAY {
             return Err(MultisigError::InvalidTimeDelay);
         }
@@ -178,21 +249,34 @@ impl MultisigSafe {
         // Store owners in instance storage with TTL
         env.storage().instance().set(&OWNERS, &owners);
         env.storage().instance().set(&THRESHOLD, &threshold);
-        env.storage().instance().set(&RECOVERY_ADDRESS, &recovery_address);
-        env.storage().instance().set(&RECOVERY_DELAY, &recovery_delay);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_ADDRESS, &recovery_address);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_DELAY, &recovery_delay);
         env.storage().instance().set(&TRANSACTION_COUNT, &0u64);
-        
+
         // Initialize rent balance tracking
         env.storage().instance().set(&RENT_BALANCE, &0i128);
-        env.storage().instance().set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+        env.storage()
+            .instance()
+            .set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
 
         // Set contract version for migration tracking
-        env.storage().instance().set(&CONTRACT_VERSION, &CURRENT_VERSION);
+        env.storage()
+            .instance()
+            .set(&CONTRACT_VERSION, &CURRENT_VERSION);
 
         // Initialize freeze state
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::new(&env));
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &Bytes::new(&env));
+
+        // Initialize proposal system
+        env.storage().instance().set(&PROPOSAL_COUNT, &0u64);
 
         // Set initial TTL for instance storage
         Self::extend_instance_ttl(&env, DEFAULT_INSTANCE_TTL)?;
@@ -211,14 +295,18 @@ impl MultisigSafe {
     ) -> Result<u64, MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         // Check if wallet is frozen
         Self::check_frozen_status(&env)?;
-        
+
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
 
-        let tx_count: u64 = env.storage().instance().get(&TRANSACTION_COUNT).unwrap_or(0);
+        let tx_count: u64 = env
+            .storage()
+            .instance()
+            .get(&TRANSACTION_COUNT)
+            .unwrap_or(0);
         let transaction_id = tx_count + 1;
 
         let transaction = Transaction {
@@ -235,7 +323,9 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&(TRANSACTIONS, transaction_id), &transaction);
-        env.storage().instance().set(&TRANSACTION_COUNT, &transaction_id);
+        env.storage()
+            .instance()
+            .set(&TRANSACTION_COUNT, &transaction_id);
 
         // Auto-sign if submitter is an owner
         Self::sign_transaction_internal(&env, transaction_id, caller.clone())?;
@@ -244,20 +334,28 @@ impl MultisigSafe {
     }
 
     /// Sign a transaction
-    pub fn sign_transaction(env: Env, caller: Address, transaction_id: u64) -> Result<(), MultisigError> {
+    pub fn sign_transaction(
+        env: Env,
+        caller: Address,
+        transaction_id: u64,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         // Check if wallet is frozen
         Self::check_frozen_status(&env)?;
-        
+
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         Self::sign_transaction_internal(&env, transaction_id, caller)
     }
 
-    fn sign_transaction_internal(env: &Env, transaction_id: u64, caller: Address) -> Result<(), MultisigError> {
+    fn sign_transaction_internal(
+        env: &Env,
+        transaction_id: u64,
+        caller: Address,
+    ) -> Result<(), MultisigError> {
         let mut transaction: Transaction = env
             .storage()
             .instance()
@@ -339,16 +437,306 @@ impl MultisigSafe {
         Ok(())
     }
 
+    /// Create a new proposal for voting
+    pub fn create_proposal(
+        env: Env,
+        caller: Address,
+        destination: Address,
+        amount: i128,
+        asset: Address,
+        duration_seconds: u64,
+    ) -> Result<u64, MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+        
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+        
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        // Validate duration
+        if duration_seconds < MIN_PROPOSAL_DURATION || duration_seconds > MAX_PROPOSAL_DURATION {
+            return Err(MultisigError::InvalidProposalDuration);
+        }
+
+        let current_time = env.ledger().timestamp();
+        let expires_at = current_time + duration_seconds;
+
+        // Generate unique proposal ID
+        let proposal_count: u64 = env.storage().instance().get(&PROPOSAL_COUNT).unwrap_or(0);
+        let proposal_id = proposal_count + 1;
+
+        // Get threshold for required votes
+        let threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
+
+        let proposal = Proposal {
+            proposal_id,
+            destination: destination.clone(),
+            amount,
+            asset: asset.clone(),
+            created_at: current_time,
+            expires_at,
+            executed: false,
+            votes: 0,
+            required_votes: threshold,
+        };
+
+        // Store proposal
+        env.storage()
+            .instance()
+            .set(&(PROPOSALS, proposal_id), &proposal);
+        env.storage().instance().set(&PROPOSAL_COUNT, &proposal_id);
+
+        // Initialize vote tracking vector for this proposal
+        let voters: Vec<Address> = Vec::new(&env);
+        env.storage()
+            .instance()
+            .set(&(PROPOSAL_VOTES, proposal_id), &voters);
+
+        // Emit proposal created event
+        let proposal_created_event = ProposalCreatedEvent {
+            proposal_id,
+            destination,
+            amount,
+            asset,
+            created_by: caller,
+            created_at: current_time,
+            expires_at,
+        };
+
+        env.events()
+            .publish((PROPOSAL_CREATED_EVENT, symbol_short!("CREATED")), proposal_created_event);
+
+        Ok(proposal_id)
+    }
+
+    /// Vote for a proposal
+    pub fn vote_for_proposal(env: Env, caller: Address, proposal_id: u64) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+        
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+        
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let mut proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&(PROPOSALS, proposal_id))
+            .ok_or(MultisigError::ProposalDoesNotExist)?;
+
+        // Check if proposal has expired
+        if env.ledger().timestamp() > proposal.expires_at {
+            return Err(MultisigError::ProposalExpired);
+        }
+
+        // Check if proposal is already executed
+        if proposal.executed {
+            return Err(MultisigError::ProposalAlreadyExecuted);
+        }
+
+        // Get current voters list
+        let mut voters: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&(PROPOSAL_VOTES, proposal_id))
+            .unwrap_or_default();
+
+        // Check if already voted
+        if voters.contains(&caller) {
+            return Err(MultisigError::AlreadyVoted);
+        }
+
+        // Add vote
+        voters.push_back(caller.clone());
+        proposal.votes += 1;
+
+        // Update storage
+        env.storage()
+            .instance()
+            .set(&(PROPOSALS, proposal_id), &proposal);
+        env.storage()
+            .instance()
+            .set(&(PROPOSAL_VOTES, proposal_id), &voters);
+
+        // Emit vote cast event
+        let vote_cast_event = VoteCastEvent {
+            proposal_id,
+            voter: caller.clone(),
+            voted_at: env.ledger().timestamp(),
+        };
+
+        env.events()
+            .publish((VOTE_CAST_EVENT, symbol_short!("CAST")), vote_cast_event);
+
+        // Auto-execute if threshold reached
+        if proposal.votes >= proposal.required_votes {
+            Self::execute_proposal(env.clone(), proposal_id)?;
+        }
+
+        Ok(())
+    }
+
+    /// Execute a proposal that has sufficient votes
+    pub fn execute_proposal(env: Env, proposal_id: u64) -> Result<(), MultisigError> {
+        let mut proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&(PROPOSALS, proposal_id))
+            .ok_or(MultisigError::ProposalDoesNotExist)?;
+
+        if proposal.executed {
+            return Err(MultisigError::ProposalAlreadyExecuted);
+        }
+
+        if proposal.votes < proposal.required_votes {
+            return Err(MultisigError::InsufficientSignatures);
+        }
+
+        // Check if proposal has expired
+        if env.ledger().timestamp() > proposal.expires_at {
+            return Err(MultisigError::ProposalExpired);
+        }
+
+        // Execute the proposal (transfer tokens)
+        if proposal.amount > 0 {
+            let token_client = token::Client::new(&env, &proposal.asset);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &proposal.destination,
+                &proposal.amount,
+            );
+        }
+
+        // Mark as executed
+        proposal.executed = true;
+        env.storage()
+            .instance()
+            .set(&(PROPOSALS, proposal_id), &proposal);
+
+        // Emit proposal executed event
+        let proposal_executed_event = ProposalExecutedEvent {
+            proposal_id,
+            executed_by: env.current_contract_address(),
+            executed_at: env.ledger().timestamp(),
+        };
+
+        env.events()
+            .publish((PROPOSAL_EXECUTED_EVENT, symbol_short!("EXECUTED")), proposal_executed_event);
+
+        Ok(())
+    }
+
+    /// Check and expire proposals that have passed their expiration time
+    pub fn cleanup_expired_proposals(env: Env) -> Result<u64, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let proposal_count: u64 = env.storage().instance().get(&PROPOSAL_COUNT).unwrap_or(0);
+        let current_time = env.ledger().timestamp();
+        let mut cleaned_count = 0u64;
+
+        // Check proposals in batches to avoid gas limit issues
+        for proposal_id in 1..=proposal_count {
+            if let Some(mut proposal): Option<Proposal> = env
+                .storage()
+                .instance()
+                .get(&(PROPOSALS, proposal_id))
+            {
+                // Only process non-executed proposals that have expired
+                if !proposal.executed && current_time > proposal.expires_at {
+                    // Mark as expired (but keep for audit trail)
+                    proposal.executed = true; // Use executed flag to prevent further actions
+                    env.storage()
+                        .instance()
+                        .set(&(PROPOSALS, proposal_id), &proposal);
+
+                    // Clean up vote tracking to save storage
+                    env.storage()
+                        .instance()
+                        .remove(&(PROPOSAL_VOTES, proposal_id));
+
+                    // Emit expiration event
+                    let proposal_expired_event = ProposalExpiredEvent {
+                        proposal_id,
+                        expired_at: current_time,
+                    };
+
+                    env.events()
+                        .publish((PROPOSAL_EXPIRED_EVENT, symbol_short!("EXPIRED")), proposal_expired_event);
+
+                    cleaned_count += 1;
+
+                    // Limit cleanup per transaction to prevent gas issues
+                    if cleaned_count >= CLEANUP_THRESHOLD {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(cleaned_count)
+    }
+
+    /// Get proposal details
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Result<Proposal, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        match env.storage().instance().get(&(PROPOSALS, proposal_id)) {
+            Some(proposal) => Ok(proposal),
+            None => Err(MultisigError::ProposalDoesNotExist),
+        }
+    }
+
+    /// Get all active (non-executed and non-expired) proposals
+    pub fn get_active_proposals(env: Env) -> Result<Vec<u64>, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let proposal_count: u64 = env.storage().instance().get(&PROPOSAL_COUNT).unwrap_or(0);
+        let current_time = env.ledger().timestamp();
+        let mut active_proposals = Vec::new(&env);
+
+        for proposal_id in 1..=proposal_count {
+            if let Some(proposal): Option<Proposal> = env
+                .storage()
+                .instance()
+                .get(&(PROPOSALS, proposal_id))
+            {
+                // Only include non-executed proposals that haven't expired
+                if !proposal.executed && current_time <= proposal.expires_at {
+                    active_proposals.push_back(proposal_id);
+                }
+            }
+        }
+
+        Ok(active_proposals)
+    }
+
+    /// Check if an address has voted on a specific proposal
+    pub fn has_voted_on_proposal(env: Env, proposal_id: u64, voter: Address) -> Result<bool, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let voters: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&(PROPOSAL_VOTES, proposal_id))
+            .unwrap_or_default();
+        
+        Ok(voters.contains(&voter))
+    }
+
     /// Add a new owner
     pub fn add_owner(env: Env, caller: Address, new_owner: Address) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
-        let mut owners: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&OWNERS)
-            .unwrap_or_default();
+        let mut owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
 
         if owners.len() as u32 >= MAX_OWNERS {
             return Err(MultisigError::MaximumOwnersExceeded);
@@ -365,7 +753,11 @@ impl MultisigSafe {
     }
 
     /// Remove an owner
-    pub fn remove_owner(env: Env, caller: Address, owner_to_remove: Address) -> Result<(), MultisigError> {
+    pub fn remove_owner(
+        env: Env,
+        caller: Address,
+        owner_to_remove: Address,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
@@ -396,7 +788,11 @@ impl MultisigSafe {
     }
 
     /// Change the signature threshold
-    pub fn change_threshold(env: Env, caller: Address, new_threshold: u32) -> Result<(), MultisigError> {
+    pub fn change_threshold(
+        env: Env,
+        caller: Address,
+        new_threshold: u32,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
@@ -493,7 +889,7 @@ impl MultisigSafe {
         new_recovery_address: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
-        
+
         let recovery_address: Address = env
             .storage()
             .instance()
@@ -511,7 +907,9 @@ impl MultisigSafe {
         // Update owners and threshold
         env.storage().instance().set(&OWNERS, &new_owners);
         env.storage().instance().set(&THRESHOLD, &new_threshold);
-        env.storage().instance().set(&RECOVERY_ADDRESS, &new_recovery_address);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_ADDRESS, &new_recovery_address);
 
         // Clear any ongoing recovery
         env.storage().instance().remove(&RECOVERY_REQUEST);
@@ -520,7 +918,10 @@ impl MultisigSafe {
         let current_time = env.ledger().timestamp();
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::from_slice(&env, b"Auto-unfreeze: recovery executed"));
+        env.storage().instance().set(
+            &FREEZE_REASON,
+            &Bytes::from_slice(&env, b"Auto-unfreeze: recovery executed"),
+        );
 
         // Emit recovery unfreeze event
         let unfreeze_event = UnfreezeEvent {
@@ -529,10 +930,8 @@ impl MultisigSafe {
             reason: Bytes::from_slice(&env, b"Auto-unfreeze: recovery executed"),
         };
 
-        env.events().publish(
-            (UNFREEZE_EVENT, symbol_short!("RECOVERY")),
-            unfreeze_event,
-        );
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("RECOVERY")), unfreeze_event);
 
         Ok(())
     }
@@ -569,7 +968,8 @@ impl MultisigSafe {
 
         // Get normal threshold and calculate freeze threshold (1/3)
         let normal_threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
-        let freeze_threshold = (normal_threshold + FREEZE_THRESHOLD_RATIO - 1) / FREEZE_THRESHOLD_RATIO;
+        let freeze_threshold =
+            (normal_threshold + FREEZE_THRESHOLD_RATIO - 1) / FREEZE_THRESHOLD_RATIO;
         let freeze_threshold = freeze_threshold.max(1); // At least 1 signature required
 
         // Create freeze transaction ID
@@ -585,7 +985,10 @@ impl MultisigSafe {
         env.storage().instance().set(&freeze_key, &true);
 
         // Count signatures for this freeze request
-        let owners: Vec<Address> = env.storage().instance().get(&OWNERS)
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&OWNERS)
             .ok_or(MultisigError::OwnerDoesNotExist)?;
         let mut signature_count = 0u32;
         for owner in &owners {
@@ -603,7 +1006,9 @@ impl MultisigSafe {
         // Execute freeze
         env.storage().instance().set(&IS_FROZEN, &true);
         env.storage().instance().set(&FREEZE_UNTIL, &freeze_until);
-        env.storage().instance().set(&FREEZE_REASON, &reason.clone());
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &reason.clone());
 
         // Emit freeze event
         let freeze_event = FreezeEvent {
@@ -613,10 +1018,8 @@ impl MultisigSafe {
             reason: reason.clone(),
         };
 
-        env.events().publish(
-            (FREEZE_EVENT, symbol_short!("EXECUTED")),
-            freeze_event,
-        );
+        env.events()
+            .publish((FREEZE_EVENT, symbol_short!("EXECUTED")), freeze_event);
 
         // Clean up freeze signatures
         for owner in &owners {
@@ -628,11 +1031,7 @@ impl MultisigSafe {
     }
 
     /// Unfreeze the wallet with high threshold (all owners)
-    pub fn unfreeze_wallet(
-        env: Env,
-        caller: Address,
-        reason: Bytes,
-    ) -> Result<(), MultisigError> {
+    pub fn unfreeze_wallet(env: Env, caller: Address, reason: Bytes) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
@@ -652,7 +1051,10 @@ impl MultisigSafe {
         }
 
         // Get all owners - high threshold means all must approve
-        let owners: Vec<Address> = env.storage().instance().get(&OWNERS)
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&OWNERS)
             .ok_or(MultisigError::OwnerDoesNotExist)?;
         let high_threshold = owners.len() as u32;
 
@@ -685,7 +1087,9 @@ impl MultisigSafe {
         // Execute unfreeze
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::new(&env));
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &Bytes::new(&env));
 
         // Emit unfreeze event
         let unfreeze_event = UnfreezeEvent {
@@ -694,10 +1098,8 @@ impl MultisigSafe {
             reason: reason.clone(),
         };
 
-        env.events().publish(
-            (UNFREEZE_EVENT, symbol_short!("EXECUTED")),
-            unfreeze_event,
-        );
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("EXECUTED")), unfreeze_event);
 
         // Clean up unfreeze signatures
         for owner in &owners {
@@ -711,7 +1113,7 @@ impl MultisigSafe {
     /// Check if wallet is frozen and auto-unfreeze if period expired
     fn check_frozen_status(env: &Env) -> Result<(), MultisigError> {
         let is_frozen: bool = env.storage().instance().get(&IS_FROZEN).unwrap_or(false);
-        
+
         if !is_frozen {
             return Ok(());
         }
@@ -731,11 +1133,17 @@ impl MultisigSafe {
     /// Auto-unfreeze when freeze period expires
     fn auto_unfreeze(env: &Env) -> Result<(), MultisigError> {
         let current_time = env.ledger().timestamp();
-        let freeze_reason: Bytes = env.storage().instance().get(&FREEZE_REASON).unwrap_or_default();
+        let freeze_reason: Bytes = env
+            .storage()
+            .instance()
+            .get(&FREEZE_REASON)
+            .unwrap_or_default();
 
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::new(env));
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &Bytes::new(env));
 
         // Emit auto-unfreeze event
         let unfreeze_event = UnfreezeEvent {
@@ -744,10 +1152,8 @@ impl MultisigSafe {
             reason: Bytes::from_slice(env, b"Auto-unfreeze: period expired"),
         };
 
-        env.events().publish(
-            (UNFREEZE_EVENT, symbol_short!("AUTO")),
-            unfreeze_event,
-        );
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("AUTO")), unfreeze_event);
 
         Ok(())
     }
@@ -756,10 +1162,14 @@ impl MultisigSafe {
     pub fn get_freeze_status(env: Env) -> Result<(bool, u64, Bytes), MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         let is_frozen: bool = env.storage().instance().get(&IS_FROZEN).unwrap_or(false);
         let freeze_until: u64 = env.storage().instance().get(&FREEZE_UNTIL).unwrap_or(0);
-        let freeze_reason: Bytes = env.storage().instance().get(&FREEZE_REASON).unwrap_or_default();
+        let freeze_reason: Bytes = env
+            .storage()
+            .instance()
+            .get(&FREEZE_REASON)
+            .unwrap_or_default();
 
         // Check if auto-unfreeze should happen
         if is_frozen {
@@ -774,13 +1184,21 @@ impl MultisigSafe {
     }
 
     /// Helper function to check if an owner has signed a specific freeze request
-    pub fn has_signed_freeze(env: Env, freeze_tx_id: u64, owner: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed_freeze(
+        env: Env,
+        freeze_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
         let freeze_key = (FREEZE_EVENT, freeze_tx_id, owner);
         Ok(env.storage().instance().has(&freeze_key))
     }
 
     /// Helper function to check if an owner has signed a specific unfreeze request
-    pub fn has_signed_unfreeze(env: Env, unfreeze_tx_id: u64, owner: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed_unfreeze(
+        env: Env,
+        unfreeze_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
         let unfreeze_key = (UNFREEZE_EVENT, unfreeze_tx_id, owner);
         Ok(env.storage().instance().has(&unfreeze_key))
     }
@@ -814,7 +1232,7 @@ impl MultisigSafe {
         // Create a temporary upgrade transaction to collect signatures
         let upgrade_tx_id = env.ledger().sequence(); // Use ledger sequence as unique ID
         let upgrade_key = (UPGRADE_EVENT, upgrade_tx_id, caller.clone());
-        
+
         // Check if this owner has already signed this upgrade
         if env.storage().instance().has(&upgrade_key) {
             return Err(MultisigError::InsufficientSignatures);
@@ -858,7 +1276,9 @@ impl MultisigSafe {
         env.deployer().update_current_contract_wasm(&new_wasm_hash);
 
         // Update version
-        env.storage().instance().set(&CONTRACT_VERSION, &(CURRENT_VERSION + 1));
+        env.storage()
+            .instance()
+            .set(&CONTRACT_VERSION, &(CURRENT_VERSION + 1));
 
         // Emit upgrade event
         let upgrade_event = UpgradeEvent {
@@ -868,10 +1288,8 @@ impl MultisigSafe {
             upgraded_at: env.ledger().timestamp(),
         };
 
-        env.events().publish(
-            (UPGRADE_EVENT, symbol_short!("EXECUTED")),
-            upgrade_event,
-        );
+        env.events()
+            .publish((UPGRADE_EVENT, symbol_short!("EXECUTED")), upgrade_event);
 
         // Clean up upgrade signatures and state
         for owner in &owners {
@@ -887,18 +1305,24 @@ impl MultisigSafe {
     fn migrate_data(env: &Env, from_version: u32, to_version: u32) -> Result<(), MultisigError> {
         // For now, no migration needed as we maintain backward compatibility
         // Future versions can add specific migration logic here
-        
+
         // Example migration logic for future versions:
         // if from_version < 2 && to_version >= 2 {
         //     // Migrate data format from v1 to v2
         // }
-        
+
         // Ensure all critical data exists and is compatible
-        let owners: Vec<Address> = env.storage().instance().get(&OWNERS)
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&OWNERS)
             .ok_or(MultisigError::EntryArchived)?;
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD)
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&THRESHOLD)
             .ok_or(MultisigError::EntryArchived)?;
-        
+
         // Validate data integrity
         if owners.is_empty() || threshold == 0 || threshold > owners.len() as u32 {
             return Err(MultisigError::InvalidThreshold);
@@ -908,7 +1332,11 @@ impl MultisigSafe {
     }
 
     /// Helper function to check if an owner has signed a specific upgrade
-    pub fn has_signed_upgrade(env: Env, upgrade_tx_id: u64, owner: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed_upgrade(
+        env: Env,
+        upgrade_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
         let upgrade_key = (UPGRADE_EVENT, upgrade_tx_id, owner);
         Ok(env.storage().instance().has(&upgrade_key))
     }
@@ -925,7 +1353,7 @@ impl MultisigSafe {
     pub fn get_owners(env: Env) -> Result<Vec<Address>, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         match env.storage().instance().get(&OWNERS) {
             Some(owners) => Ok(owners),
             None => Err(MultisigError::EntryArchived),
@@ -935,7 +1363,7 @@ impl MultisigSafe {
     pub fn get_threshold(env: Env) -> Result<u32, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         match env.storage().instance().get(&THRESHOLD) {
             Some(threshold) => Ok(threshold),
             None => Err(MultisigError::EntryArchived),
@@ -945,8 +1373,12 @@ impl MultisigSafe {
     pub fn get_transaction(env: Env, transaction_id: u64) -> Result<Transaction, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
-        match env.storage().instance().get(&(TRANSACTIONS, transaction_id)) {
+
+        match env
+            .storage()
+            .instance()
+            .get(&(TRANSACTIONS, transaction_id))
+        {
             Some(transaction) => Ok(transaction),
             None => Err(MultisigError::InvalidTransactionId),
         }
@@ -957,14 +1389,15 @@ impl MultisigSafe {
     ) -> Result<(Address, u64, Option<RecoveryRequest>), MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         let recovery_address: Address = env
             .storage()
             .instance()
             .get(&RECOVERY_ADDRESS)
             .ok_or(MultisigError::EntryArchived)?;
         let recovery_delay: u64 = env.storage().instance().get(&RECOVERY_DELAY).unwrap();
-        let recovery_request: Option<RecoveryRequest> = env.storage().instance().get(&RECOVERY_REQUEST);
+        let recovery_request: Option<RecoveryRequest> =
+            env.storage().instance().get(&RECOVERY_REQUEST);
 
         Ok((recovery_address, recovery_delay, recovery_request))
     }
@@ -972,17 +1405,21 @@ impl MultisigSafe {
     pub fn is_owner(env: Env, address: Address) -> Result<bool, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         match env.storage().instance().get(&OWNERS) {
             Some(owners) => Ok(owners.contains(&address)),
             None => Err(MultisigError::EntryArchived),
         }
     }
 
-    pub fn has_signed(env: Env, transaction_id: u64, signer: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed(
+        env: Env,
+        transaction_id: u64,
+        signer: Address,
+    ) -> Result<bool, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         Ok(env
             .storage()
             .instance()
@@ -991,16 +1428,12 @@ impl MultisigSafe {
 
     /// Helper function to check if address is an owner
     fn require_owner(env: &Env, address: &Address) -> Result<(), MultisigError> {
-        let owners: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&OWNERS)
-            .unwrap_or_default();
-        
+        let owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
+
         if !owners.contains(address) {
             return Err(MultisigError::Unauthorized);
         }
-        
+
         Ok(())
     }
 
@@ -1009,43 +1442,55 @@ impl MultisigSafe {
         if extend_ledgers < MIN_TTL_EXTENSION {
             return Err(MultisigError::InvalidTtlExtension);
         }
-        
-        env.storage().instance().extend_ttl(env.ledger().sequence(), extend_ledgers);
-        env.storage().instance().set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
-        
+
+        env.storage()
+            .instance()
+            .extend_ttl(env.ledger().sequence(), extend_ledgers);
+        env.storage()
+            .instance()
+            .set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+
         Ok(())
     }
 
     /// Check and extend instance TTL automatically
     fn auto_extend_instance_ttl(env: &Env) -> Result<(), MultisigError> {
-        let last_extension: u32 = env.storage().instance().get(&LAST_TTL_EXTENSION).unwrap_or(0);
+        let last_extension: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_TTL_EXTENSION)
+            .unwrap_or(0);
         let current_ledger = env.ledger().sequence();
         let ledgers_since_extension = current_ledger.saturating_sub(last_extension);
-        
+
         // Auto-extend if we've used more than half of the TTL
         if ledgers_since_extension > DEFAULT_INSTANCE_TTL / 2 {
             Self::extend_instance_ttl(env, DEFAULT_INSTANCE_TTL)?;
         }
-        
+
         Ok(())
     }
 
     /// Calculate minimum balance requirements for storage
     pub fn calculate_minimum_balance(env: &Env) -> Result<i128, MultisigError> {
         let owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
-        let tx_count: u64 = env.storage().instance().get(&TRANSACTION_COUNT).unwrap_or(0);
-        
+        let tx_count: u64 = env
+            .storage()
+            .instance()
+            .get(&TRANSACTION_COUNT)
+            .unwrap_or(0);
+
         // Base storage cost estimation (rough calculation)
         // Each Address: ~32 bytes, each transaction: ~200 bytes, overhead: ~1000 bytes
         let storage_bytes = 1000 + (owners.len() * 32) + (tx_count as usize * 200);
-        
+
         // Convert to stroops (1 XLM = 10^7 stroops)
         // Rough estimate: 1 byte = 1 stroop for storage cost
         let base_cost = storage_bytes as i128;
-        
+
         // Add buffer for safety
         let buffered_cost = base_cost * RENT_BUFFER_MULTIPLIER as i128;
-        
+
         Ok(buffered_cost)
     }
 
@@ -1053,23 +1498,23 @@ impl MultisigSafe {
     pub fn top_up_rent(env: Env, caller: Address, amount: i128) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         if amount <= 0 {
             return Err(MultisigError::InsufficientBalanceForRent);
         }
-        
+
         // Transfer XLM to contract for rent
         let token_client = token::Client::new(&env, &env.current_contract_address());
         token_client.transfer(&caller, &env.current_contract_address(), &amount);
-        
+
         // Update rent balance
         let current_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
         let new_balance = current_balance + amount;
         env.storage().instance().set(&RENT_BALANCE, &new_balance);
-        
+
         // Auto-extend persistent storage TTL if needed
         Self::extend_persistent_ttl(&env, DEFAULT_PERSISTENT_TTL)?;
-        
+
         Ok(())
     }
 
@@ -1078,10 +1523,12 @@ impl MultisigSafe {
         if extend_ledgers < MIN_TTL_EXTENSION {
             return Err(MultisigError::InvalidTtlExtension);
         }
-        
+
         // Extend TTL for all persistent entries
-        env.storage().persistent().extend_ttl(env.ledger().sequence(), extend_ledgers);
-        
+        env.storage()
+            .persistent()
+            .extend_ttl(env.ledger().sequence(), extend_ledgers);
+
         Ok(())
     }
 
@@ -1092,41 +1539,51 @@ impl MultisigSafe {
 
     /// Get TTL information
     pub fn get_ttl_info(env: Env) -> Result<(u32, u32, i128), MultisigError> {
-        let last_extension: u32 = env.storage().instance().get(&LAST_TTL_EXTENSION).unwrap_or(0);
+        let last_extension: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_TTL_EXTENSION)
+            .unwrap_or(0);
         let current_ledger = env.ledger().sequence();
-        let remaining_ttl = DEFAULT_INSTANCE_TTL.saturating_sub(current_ledger.saturating_sub(last_extension));
+        let remaining_ttl =
+            DEFAULT_INSTANCE_TTL.saturating_sub(current_ledger.saturating_sub(last_extension));
         let rent_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
-        
+
         Ok((last_extension, remaining_ttl, rent_balance))
     }
 
     /// Store data in persistent storage with automatic TTL management
-    pub fn store_persistent_data(env: Env, caller: Address, key: Symbol, value: Bytes) -> Result<(), MultisigError> {
+    pub fn store_persistent_data(
+        env: Env,
+        caller: Address,
+        key: Symbol,
+        value: Bytes,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         // Check minimum balance requirements
         let min_balance = Self::calculate_minimum_balance(&env)?;
         let current_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
-        
+
         if current_balance < min_balance {
             return Err(MultisigError::InsufficientBalanceForRent);
         }
-        
+
         // Store in persistent storage
         let persistent_key = (PERSISTENT_DATA, key);
         env.storage().persistent().set(&persistent_key, &value);
-        
+
         // Auto-extend TTL
         Self::extend_persistent_ttl(&env, DEFAULT_PERSISTENT_TTL)?;
-        
+
         Ok(())
     }
 
     /// Retrieve data from persistent storage with archival check
     pub fn get_persistent_data(env: Env, key: Symbol) -> Result<Bytes, MultisigError> {
         let persistent_key = (PERSISTENT_DATA, key);
-        
+
         // Check if entry exists and is not archived
         match env.storage().persistent().get(&persistent_key) {
             Some(value) => Ok(value),
@@ -1155,18 +1612,21 @@ mod test {
                 1,
                 recovery_address.clone(),
                 recovery_delay,
-            ).unwrap();
+            )
+            .unwrap();
         });
 
         // Property 1: Recovery cannot be executed immediately after initiation
         env.as_contract(&env.current_contract_address(), || {
-            MultisigSafe::initiate_recovery(env.clone(), owner.clone(), Address::generate(&env)).unwrap();
+            MultisigSafe::initiate_recovery(env.clone(), owner.clone(), Address::generate(&env))
+                .unwrap();
             let result = MultisigSafe::execute_recovery(env.clone());
             assert_eq!(result, Err(MultisigError::RecoveryDelayNotPassed));
         });
 
         // Property 2: Recovery can be executed exactly after delay
-        env.ledger().with_mut(|li| li.timestamp += recovery_delay + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp += recovery_delay + 1);
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::execute_recovery(env.clone()).unwrap();
         });
@@ -1177,7 +1637,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1186,10 +1646,12 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             // Test TTL info retrieval
-            let (last_ext, remaining_ttl, rent_bal) = MultisigSafe::get_ttl_info(env.clone()).unwrap();
+            let (last_ext, remaining_ttl, rent_bal) =
+                MultisigSafe::get_ttl_info(env.clone()).unwrap();
             assert_eq!(last_ext, 0);
             assert!(rent_bal >= 0);
             assert!(remaining_ttl > 0);
@@ -1201,7 +1663,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1210,12 +1672,13 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             // Test rent balance initially
             let initial_balance = MultisigSafe::get_rent_balance(env.clone()).unwrap();
             assert_eq!(initial_balance, 0);
-            
+
             // Test minimum balance calculation
             let min_balance = MultisigSafe::calculate_minimum_balance(&env).unwrap();
             assert!(min_balance > 0);
@@ -1227,7 +1690,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1236,8 +1699,9 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             // Test persistent data storage (should fail without rent)
             let test_key = symbol_short!("TEST_KEY");
             let test_value = Bytes::from_slice(&env, b"test_data");
@@ -1248,7 +1712,7 @@ mod test {
                 test_value,
             );
             assert_eq!(result, Err(MultisigError::InsufficientBalanceForRent));
-            
+
             // Test retrieval of non-existent data
             let result = MultisigSafe::get_persistent_data(env.clone(), test_key);
             assert_eq!(result, Err(MultisigError::EntryArchived));
@@ -1260,7 +1724,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1269,20 +1733,256 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+            )
+            .unwrap();
+
             // Simulate ledger progression to trigger auto-extension
             env.ledger().with_mut(|li| {
                 li.sequence += DEFAULT_INSTANCE_TTL / 2 + 1000;
             });
-            
+
             // Call any function to trigger auto-extension
             let _ = MultisigSafe::get_owners(env.clone()).unwrap();
-            
+
             // Verify TTL was extended
             let (last_ext, remaining_ttl, _) = MultisigSafe::get_ttl_info(env.clone()).unwrap();
             assert!(last_ext > 0);
             assert!(remaining_ttl > DEFAULT_INSTANCE_TTL / 2);
+        });
+    }
+
+    #[test]
+    fn test_proposal_creation() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let destination = Address::generate(&env);
+        let asset = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+            )
+            .unwrap();
+
+            // Test proposal creation
+            let proposal_id = MultisigSafe::create_proposal(
+                env.clone(),
+                owner.clone(),
+                destination.clone(),
+                1000,
+                asset.clone(),
+                3600, // 1 hour duration
+            )
+            .unwrap();
+
+            assert_eq!(proposal_id, 1);
+
+            // Verify proposal details
+            let proposal = MultisigSafe::get_proposal(env.clone(), proposal_id).unwrap();
+            assert_eq!(proposal.proposal_id, proposal_id);
+            assert_eq!(proposal.destination, destination);
+            assert_eq!(proposal.amount, 1000);
+            assert_eq!(proposal.asset, asset);
+            assert_eq!(proposal.votes, 0);
+            assert_eq!(proposal.required_votes, 1);
+            assert!(!proposal.executed);
+        });
+    }
+
+    #[test]
+    fn test_proposal_voting() {
+        let env = Env::default();
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let destination = Address::generate(&env);
+        let asset = Address::generate(&env);
+
+        // Setup contract with 2 owners, threshold 2
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner1.clone(), owner2.clone()],
+                2,
+                recovery_address.clone(),
+                86400,
+            )
+            .unwrap();
+
+            // Create proposal
+            let proposal_id = MultisigSafe::create_proposal(
+                env.clone(),
+                owner1.clone(),
+                destination.clone(),
+                1000,
+                asset.clone(),
+                3600,
+            )
+            .unwrap();
+
+            // Test first vote
+            MultisigSafe::vote_for_proposal(env.clone(), owner1.clone(), proposal_id).unwrap();
+
+            let proposal = MultisigSafe::get_proposal(env.clone(), proposal_id).unwrap();
+            assert_eq!(proposal.votes, 1);
+            assert!(!proposal.executed);
+
+            // Test second vote (should execute)
+            MultisigSafe::vote_for_proposal(env.clone(), owner2.clone(), proposal_id).unwrap();
+
+            let proposal = MultisigSafe::get_proposal(env.clone(), proposal_id).unwrap();
+            assert_eq!(proposal.votes, 2);
+            assert!(proposal.executed);
+
+            // Test double voting prevention
+            let result = MultisigSafe::vote_for_proposal(env.clone(), owner1.clone(), proposal_id);
+            assert_eq!(result, Err(MultisigError::AlreadyVoted));
+        });
+    }
+
+    #[test]
+    fn test_proposal_expiration() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let destination = Address::generate(&env);
+        let asset = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+            )
+            .unwrap();
+
+            // Create proposal with short duration
+            let proposal_id = MultisigSafe::create_proposal(
+                env.clone(),
+                owner.clone(),
+                destination.clone(),
+                1000,
+                asset.clone(),
+                3600, // 1 hour
+            )
+            .unwrap();
+
+            // Fast forward time past expiration
+            env.ledger().with_mut(|li| li.timestamp += 3700);
+
+            // Test voting on expired proposal
+            let result = MultisigSafe::vote_for_proposal(env.clone(), owner.clone(), proposal_id);
+            assert_eq!(result, Err(MultisigError::ProposalExpired));
+
+            // Test cleanup
+            let cleaned = MultisigSafe::cleanup_expired_proposals(env.clone()).unwrap();
+            assert_eq!(cleaned, 1);
+
+            // Verify proposal is marked as executed (expired)
+            let proposal = MultisigSafe::get_proposal(env.clone(), proposal_id).unwrap();
+            assert!(proposal.executed);
+        });
+    }
+
+    #[test]
+    fn test_proposal_validation() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let destination = Address::generate(&env);
+        let asset = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+            )
+            .unwrap();
+
+            // Test invalid duration (too short)
+            let result = MultisigSafe::create_proposal(
+                env.clone(),
+                owner.clone(),
+                destination.clone(),
+                1000,
+                asset.clone(),
+                1800, // Less than minimum
+            );
+            assert_eq!(result, Err(MultisigError::InvalidProposalDuration));
+
+            // Test invalid duration (too long)
+            let result = MultisigSafe::create_proposal(
+                env.clone(),
+                owner.clone(),
+                destination.clone(),
+                1000,
+                asset.clone(),
+                3000000, // More than maximum
+            );
+            assert_eq!(result, Err(MultisigError::InvalidProposalDuration));
+        });
+    }
+
+    #[test]
+    fn test_active_proposals() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let destination = Address::generate(&env);
+        let asset = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+            )
+            .unwrap();
+
+            // Create multiple proposals
+            let proposal1 = MultisigSafe::create_proposal(
+                env.clone(),
+                owner.clone(),
+                destination.clone(),
+                1000,
+                asset.clone(),
+                3600,
+            )
+            .unwrap();
+
+            let proposal2 = MultisigSafe::create_proposal(
+                env.clone(),
+                owner.clone(),
+                destination.clone(),
+                2000,
+                asset.clone(),
+                3600,
+            )
+            .unwrap();
+
+            // Execute one proposal
+            MultisigSafe::vote_for_proposal(env.clone(), owner.clone(), proposal1).unwrap();
+
+            // Get active proposals
+            let active_proposals = MultisigSafe::get_active_proposals(env.clone()).unwrap();
+            assert_eq!(active_proposals.len(), 1);
+            assert_eq!(active_proposals.get(0).unwrap(), &proposal2);
         });
     }
 }
