@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, env, panic, symbol_short,
-    token, Address, Bytes, Env, IntoVal, Symbol, Map, Vec,
+    contract, contracterror, contractimpl, contracttype, env, panic, symbol_short, token, Address,
+    Bytes, Env, IntoVal, Map, Symbol, Vec,
 };
 
 use thiserror::Error;
@@ -120,6 +120,8 @@ const UPGRADE_STATE: Symbol = symbol_short!("UPG_STATE");
 const IS_FROZEN: Symbol = symbol_short!("IS_FROZEN");
 const FREEZE_UNTIL: Symbol = symbol_short!("FREEZE_UNTIL");
 const FREEZE_REASON: Symbol = symbol_short!("FREEZE_RSN");
+const LAST_ACTIVE_LEDGER: Symbol = symbol_short!("LAST_ACTIVE");
+const RECOVERY_KEY: Symbol = symbol_short!("RECOVERY_KEY");
 
 // Event topics
 const UPGRADE_EVENT: Symbol = symbol_short!("UPGRADE");
@@ -137,6 +139,7 @@ const CURRENT_VERSION: u32 = 1; // Current contract version
 const MIN_FREEZE_DURATION: u64 = 3600; // 1 hour in seconds
 const MAX_FREEZE_DURATION: u64 = 2592000; // 30 days in seconds
 const FREEZE_THRESHOLD_RATIO: u32 = 3; // Freeze requires 1/3 of normal threshold
+const TIME_LOCK_PERIOD: u64 = 15552000; // 180 days in ledgers (6 months)
 
 #[contract]
 pub struct MultisigSafe;
@@ -150,19 +153,20 @@ impl MultisigSafe {
         threshold: u32,
         recovery_address: Address,
         recovery_delay: u64,
+        recovery_key: Address,
     ) -> Result<(), MultisigError> {
         if owners.is_empty() {
             return Err(MultisigError::InvalidThreshold);
         }
-        
+
         if threshold == 0 || threshold > owners.len() as u32 {
             return Err(MultisigError::InvalidThreshold);
         }
-        
+
         if owners.len() as u32 > MAX_OWNERS {
             return Err(MultisigError::MaximumOwnersExceeded);
         }
-        
+
         if recovery_delay < MIN_RECOVERY_DELAY {
             return Err(MultisigError::InvalidTimeDelay);
         }
@@ -178,21 +182,37 @@ impl MultisigSafe {
         // Store owners in instance storage with TTL
         env.storage().instance().set(&OWNERS, &owners);
         env.storage().instance().set(&THRESHOLD, &threshold);
-        env.storage().instance().set(&RECOVERY_ADDRESS, &recovery_address);
-        env.storage().instance().set(&RECOVERY_DELAY, &recovery_delay);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_ADDRESS, &recovery_address);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_DELAY, &recovery_delay);
+        env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
         env.storage().instance().set(&TRANSACTION_COUNT, &0u64);
-        
+
         // Initialize rent balance tracking
         env.storage().instance().set(&RENT_BALANCE, &0i128);
-        env.storage().instance().set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+        env.storage()
+            .instance()
+            .set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+
+        // Initialize time-lock recovery tracking
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         // Set contract version for migration tracking
-        env.storage().instance().set(&CONTRACT_VERSION, &CURRENT_VERSION);
+        env.storage()
+            .instance()
+            .set(&CONTRACT_VERSION, &CURRENT_VERSION);
 
         // Initialize freeze state
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::new(&env));
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &Bytes::new(&env));
 
         // Set initial TTL for instance storage
         Self::extend_instance_ttl(&env, DEFAULT_INSTANCE_TTL)?;
@@ -211,14 +231,18 @@ impl MultisigSafe {
     ) -> Result<u64, MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         // Check if wallet is frozen
         Self::check_frozen_status(&env)?;
-        
+
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
 
-        let tx_count: u64 = env.storage().instance().get(&TRANSACTION_COUNT).unwrap_or(0);
+        let tx_count: u64 = env
+            .storage()
+            .instance()
+            .get(&TRANSACTION_COUNT)
+            .unwrap_or(0);
         let transaction_id = tx_count + 1;
 
         let transaction = Transaction {
@@ -235,7 +259,9 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&(TRANSACTIONS, transaction_id), &transaction);
-        env.storage().instance().set(&TRANSACTION_COUNT, &transaction_id);
+        env.storage()
+            .instance()
+            .set(&TRANSACTION_COUNT, &transaction_id);
 
         // Auto-sign if submitter is an owner
         Self::sign_transaction_internal(&env, transaction_id, caller.clone())?;
@@ -244,20 +270,28 @@ impl MultisigSafe {
     }
 
     /// Sign a transaction
-    pub fn sign_transaction(env: Env, caller: Address, transaction_id: u64) -> Result<(), MultisigError> {
+    pub fn sign_transaction(
+        env: Env,
+        caller: Address,
+        transaction_id: u64,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         // Check if wallet is frozen
         Self::check_frozen_status(&env)?;
-        
+
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         Self::sign_transaction_internal(&env, transaction_id, caller)
     }
 
-    fn sign_transaction_internal(env: &Env, transaction_id: u64, caller: Address) -> Result<(), MultisigError> {
+    fn sign_transaction_internal(
+        env: &Env,
+        transaction_id: u64,
+        caller: Address,
+    ) -> Result<(), MultisigError> {
         let mut transaction: Transaction = env
             .storage()
             .instance()
@@ -336,6 +370,11 @@ impl MultisigSafe {
             .instance()
             .set(&(TRANSACTIONS, transaction_id), &transaction);
 
+        // Reset activity timer on successful transaction execution
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
+
         Ok(())
     }
 
@@ -344,11 +383,7 @@ impl MultisigSafe {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
-        let mut owners: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&OWNERS)
-            .unwrap_or_default();
+        let mut owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
 
         if owners.len() as u32 >= MAX_OWNERS {
             return Err(MultisigError::MaximumOwnersExceeded);
@@ -365,7 +400,11 @@ impl MultisigSafe {
     }
 
     /// Remove an owner
-    pub fn remove_owner(env: Env, caller: Address, owner_to_remove: Address) -> Result<(), MultisigError> {
+    pub fn remove_owner(
+        env: Env,
+        caller: Address,
+        owner_to_remove: Address,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
@@ -396,7 +435,11 @@ impl MultisigSafe {
     }
 
     /// Change the signature threshold
-    pub fn change_threshold(env: Env, caller: Address, new_threshold: u32) -> Result<(), MultisigError> {
+    pub fn change_threshold(
+        env: Env,
+        caller: Address,
+        new_threshold: u32,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
@@ -493,7 +536,7 @@ impl MultisigSafe {
         new_recovery_address: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
-        
+
         let recovery_address: Address = env
             .storage()
             .instance()
@@ -511,7 +554,9 @@ impl MultisigSafe {
         // Update owners and threshold
         env.storage().instance().set(&OWNERS, &new_owners);
         env.storage().instance().set(&THRESHOLD, &new_threshold);
-        env.storage().instance().set(&RECOVERY_ADDRESS, &new_recovery_address);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_ADDRESS, &new_recovery_address);
 
         // Clear any ongoing recovery
         env.storage().instance().remove(&RECOVERY_REQUEST);
@@ -520,7 +565,10 @@ impl MultisigSafe {
         let current_time = env.ledger().timestamp();
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::from_slice(&env, b"Auto-unfreeze: recovery executed"));
+        env.storage().instance().set(
+            &FREEZE_REASON,
+            &Bytes::from_slice(&env, b"Auto-unfreeze: recovery executed"),
+        );
 
         // Emit recovery unfreeze event
         let unfreeze_event = UnfreezeEvent {
@@ -529,10 +577,111 @@ impl MultisigSafe {
             reason: Bytes::from_slice(&env, b"Auto-unfreeze: recovery executed"),
         };
 
-        env.events().publish(
-            (UNFREEZE_EVENT, symbol_short!("RECOVERY")),
-            unfreeze_event,
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("RECOVERY")), unfreeze_event);
+
+        Ok(())
+    }
+
+    /// Heartbeat function to reset the time-lock timer without moving funds
+    /// Can be called by any owner to prove activity
+    pub fn heartbeat(env: Env, caller: Address) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        // Update last activity ledger
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
+
+        Ok(())
+    }
+
+    /// Time-lock recovery function that activates after inactivity period
+    /// Can only be called by the recovery key after time-lock period expires
+    pub fn time_lock_recovery(
+        env: Env,
+        caller: Address,
+        new_owners: Vec<Address>,
+        new_threshold: u32,
+        new_recovery_address: Address,
+        new_recovery_key: Address,
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+
+        // Verify caller is the recovery key
+        let recovery_key: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_KEY)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        if caller != recovery_key {
+            return Err(MultisigError::Unauthorized);
+        }
+
+        // Check if time-lock period has passed
+        let last_active: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_ACTIVE_LEDGER)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_ledger = env.ledger().sequence();
+
+        if current_ledger.saturating_sub(last_active) < TIME_LOCK_PERIOD as u32 {
+            return Err(MultisigError::RecoveryDelayNotPassed);
+        }
+
+        // Validate new owners and threshold
+        if new_owners.is_empty() || new_threshold == 0 || new_threshold > new_owners.len() as u32 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        if new_owners.len() as u32 > MAX_OWNERS {
+            return Err(MultisigError::MaximumOwnersExceeded);
+        }
+
+        // Update wallet state
+        env.storage().instance().set(&OWNERS, &new_owners);
+        env.storage().instance().set(&THRESHOLD, &new_threshold);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_ADDRESS, &new_recovery_address);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_KEY, &new_recovery_key);
+
+        // Reset activity timer
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
+
+        // Clear any ongoing recovery
+        env.storage().instance().remove(&RECOVERY_REQUEST);
+
+        // Auto-unfreeze wallet after successful time-lock recovery
+        env.storage().instance().set(&IS_FROZEN, &false);
+        env.storage().instance().set(&FREEZE_UNTIL, &0u64);
+        env.storage().instance().set(
+            &FREEZE_REASON,
+            &Bytes::from_slice(&env, b"Auto-unfreeze: time-lock recovery executed"),
         );
+
+        // Emit time-lock recovery event
+        let unfreeze_event = UnfreezeEvent {
+            unfrozen_by: caller.clone(),
+            unfrozen_at: env.ledger().timestamp(),
+            reason: Bytes::from_slice(&env, b"Time-lock recovery executed"),
+        };
+
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("TIME_LOCK")), unfreeze_event);
 
         Ok(())
     }
@@ -569,7 +718,8 @@ impl MultisigSafe {
 
         // Get normal threshold and calculate freeze threshold (1/3)
         let normal_threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
-        let freeze_threshold = (normal_threshold + FREEZE_THRESHOLD_RATIO - 1) / FREEZE_THRESHOLD_RATIO;
+        let freeze_threshold =
+            (normal_threshold + FREEZE_THRESHOLD_RATIO - 1) / FREEZE_THRESHOLD_RATIO;
         let freeze_threshold = freeze_threshold.max(1); // At least 1 signature required
 
         // Create freeze transaction ID
@@ -585,7 +735,10 @@ impl MultisigSafe {
         env.storage().instance().set(&freeze_key, &true);
 
         // Count signatures for this freeze request
-        let owners: Vec<Address> = env.storage().instance().get(&OWNERS)
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&OWNERS)
             .ok_or(MultisigError::OwnerDoesNotExist)?;
         let mut signature_count = 0u32;
         for owner in &owners {
@@ -603,7 +756,9 @@ impl MultisigSafe {
         // Execute freeze
         env.storage().instance().set(&IS_FROZEN, &true);
         env.storage().instance().set(&FREEZE_UNTIL, &freeze_until);
-        env.storage().instance().set(&FREEZE_REASON, &reason.clone());
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &reason.clone());
 
         // Emit freeze event
         let freeze_event = FreezeEvent {
@@ -613,10 +768,8 @@ impl MultisigSafe {
             reason: reason.clone(),
         };
 
-        env.events().publish(
-            (FREEZE_EVENT, symbol_short!("EXECUTED")),
-            freeze_event,
-        );
+        env.events()
+            .publish((FREEZE_EVENT, symbol_short!("EXECUTED")), freeze_event);
 
         // Clean up freeze signatures
         for owner in &owners {
@@ -628,11 +781,7 @@ impl MultisigSafe {
     }
 
     /// Unfreeze the wallet with high threshold (all owners)
-    pub fn unfreeze_wallet(
-        env: Env,
-        caller: Address,
-        reason: Bytes,
-    ) -> Result<(), MultisigError> {
+    pub fn unfreeze_wallet(env: Env, caller: Address, reason: Bytes) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
 
@@ -652,7 +801,10 @@ impl MultisigSafe {
         }
 
         // Get all owners - high threshold means all must approve
-        let owners: Vec<Address> = env.storage().instance().get(&OWNERS)
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&OWNERS)
             .ok_or(MultisigError::OwnerDoesNotExist)?;
         let high_threshold = owners.len() as u32;
 
@@ -685,7 +837,9 @@ impl MultisigSafe {
         // Execute unfreeze
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::new(&env));
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &Bytes::new(&env));
 
         // Emit unfreeze event
         let unfreeze_event = UnfreezeEvent {
@@ -694,10 +848,8 @@ impl MultisigSafe {
             reason: reason.clone(),
         };
 
-        env.events().publish(
-            (UNFREEZE_EVENT, symbol_short!("EXECUTED")),
-            unfreeze_event,
-        );
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("EXECUTED")), unfreeze_event);
 
         // Clean up unfreeze signatures
         for owner in &owners {
@@ -711,7 +863,7 @@ impl MultisigSafe {
     /// Check if wallet is frozen and auto-unfreeze if period expired
     fn check_frozen_status(env: &Env) -> Result<(), MultisigError> {
         let is_frozen: bool = env.storage().instance().get(&IS_FROZEN).unwrap_or(false);
-        
+
         if !is_frozen {
             return Ok(());
         }
@@ -731,11 +883,17 @@ impl MultisigSafe {
     /// Auto-unfreeze when freeze period expires
     fn auto_unfreeze(env: &Env) -> Result<(), MultisigError> {
         let current_time = env.ledger().timestamp();
-        let freeze_reason: Bytes = env.storage().instance().get(&FREEZE_REASON).unwrap_or_default();
+        let freeze_reason: Bytes = env
+            .storage()
+            .instance()
+            .get(&FREEZE_REASON)
+            .unwrap_or_default();
 
         env.storage().instance().set(&IS_FROZEN, &false);
         env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(&FREEZE_REASON, &Bytes::new(env));
+        env.storage()
+            .instance()
+            .set(&FREEZE_REASON, &Bytes::new(env));
 
         // Emit auto-unfreeze event
         let unfreeze_event = UnfreezeEvent {
@@ -744,10 +902,8 @@ impl MultisigSafe {
             reason: Bytes::from_slice(env, b"Auto-unfreeze: period expired"),
         };
 
-        env.events().publish(
-            (UNFREEZE_EVENT, symbol_short!("AUTO")),
-            unfreeze_event,
-        );
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("AUTO")), unfreeze_event);
 
         Ok(())
     }
@@ -756,10 +912,14 @@ impl MultisigSafe {
     pub fn get_freeze_status(env: Env) -> Result<(bool, u64, Bytes), MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         let is_frozen: bool = env.storage().instance().get(&IS_FROZEN).unwrap_or(false);
         let freeze_until: u64 = env.storage().instance().get(&FREEZE_UNTIL).unwrap_or(0);
-        let freeze_reason: Bytes = env.storage().instance().get(&FREEZE_REASON).unwrap_or_default();
+        let freeze_reason: Bytes = env
+            .storage()
+            .instance()
+            .get(&FREEZE_REASON)
+            .unwrap_or_default();
 
         // Check if auto-unfreeze should happen
         if is_frozen {
@@ -774,13 +934,21 @@ impl MultisigSafe {
     }
 
     /// Helper function to check if an owner has signed a specific freeze request
-    pub fn has_signed_freeze(env: Env, freeze_tx_id: u64, owner: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed_freeze(
+        env: Env,
+        freeze_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
         let freeze_key = (FREEZE_EVENT, freeze_tx_id, owner);
         Ok(env.storage().instance().has(&freeze_key))
     }
 
     /// Helper function to check if an owner has signed a specific unfreeze request
-    pub fn has_signed_unfreeze(env: Env, unfreeze_tx_id: u64, owner: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed_unfreeze(
+        env: Env,
+        unfreeze_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
         let unfreeze_key = (UNFREEZE_EVENT, unfreeze_tx_id, owner);
         Ok(env.storage().instance().has(&unfreeze_key))
     }
@@ -814,7 +982,7 @@ impl MultisigSafe {
         // Create a temporary upgrade transaction to collect signatures
         let upgrade_tx_id = env.ledger().sequence(); // Use ledger sequence as unique ID
         let upgrade_key = (UPGRADE_EVENT, upgrade_tx_id, caller.clone());
-        
+
         // Check if this owner has already signed this upgrade
         if env.storage().instance().has(&upgrade_key) {
             return Err(MultisigError::InsufficientSignatures);
@@ -858,7 +1026,9 @@ impl MultisigSafe {
         env.deployer().update_current_contract_wasm(&new_wasm_hash);
 
         // Update version
-        env.storage().instance().set(&CONTRACT_VERSION, &(CURRENT_VERSION + 1));
+        env.storage()
+            .instance()
+            .set(&CONTRACT_VERSION, &(CURRENT_VERSION + 1));
 
         // Emit upgrade event
         let upgrade_event = UpgradeEvent {
@@ -868,10 +1038,8 @@ impl MultisigSafe {
             upgraded_at: env.ledger().timestamp(),
         };
 
-        env.events().publish(
-            (UPGRADE_EVENT, symbol_short!("EXECUTED")),
-            upgrade_event,
-        );
+        env.events()
+            .publish((UPGRADE_EVENT, symbol_short!("EXECUTED")), upgrade_event);
 
         // Clean up upgrade signatures and state
         for owner in &owners {
@@ -887,18 +1055,24 @@ impl MultisigSafe {
     fn migrate_data(env: &Env, from_version: u32, to_version: u32) -> Result<(), MultisigError> {
         // For now, no migration needed as we maintain backward compatibility
         // Future versions can add specific migration logic here
-        
+
         // Example migration logic for future versions:
         // if from_version < 2 && to_version >= 2 {
         //     // Migrate data format from v1 to v2
         // }
-        
+
         // Ensure all critical data exists and is compatible
-        let owners: Vec<Address> = env.storage().instance().get(&OWNERS)
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&OWNERS)
             .ok_or(MultisigError::EntryArchived)?;
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD)
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&THRESHOLD)
             .ok_or(MultisigError::EntryArchived)?;
-        
+
         // Validate data integrity
         if owners.is_empty() || threshold == 0 || threshold > owners.len() as u32 {
             return Err(MultisigError::InvalidThreshold);
@@ -908,7 +1082,11 @@ impl MultisigSafe {
     }
 
     /// Helper function to check if an owner has signed a specific upgrade
-    pub fn has_signed_upgrade(env: Env, upgrade_tx_id: u64, owner: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed_upgrade(
+        env: Env,
+        upgrade_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
         let upgrade_key = (UPGRADE_EVENT, upgrade_tx_id, owner);
         Ok(env.storage().instance().has(&upgrade_key))
     }
@@ -925,7 +1103,7 @@ impl MultisigSafe {
     pub fn get_owners(env: Env) -> Result<Vec<Address>, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         match env.storage().instance().get(&OWNERS) {
             Some(owners) => Ok(owners),
             None => Err(MultisigError::EntryArchived),
@@ -935,7 +1113,7 @@ impl MultisigSafe {
     pub fn get_threshold(env: Env) -> Result<u32, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         match env.storage().instance().get(&THRESHOLD) {
             Some(threshold) => Ok(threshold),
             None => Err(MultisigError::EntryArchived),
@@ -945,8 +1123,12 @@ impl MultisigSafe {
     pub fn get_transaction(env: Env, transaction_id: u64) -> Result<Transaction, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
-        match env.storage().instance().get(&(TRANSACTIONS, transaction_id)) {
+
+        match env
+            .storage()
+            .instance()
+            .get(&(TRANSACTIONS, transaction_id))
+        {
             Some(transaction) => Ok(transaction),
             None => Err(MultisigError::InvalidTransactionId),
         }
@@ -957,14 +1139,15 @@ impl MultisigSafe {
     ) -> Result<(Address, u64, Option<RecoveryRequest>), MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         let recovery_address: Address = env
             .storage()
             .instance()
             .get(&RECOVERY_ADDRESS)
             .ok_or(MultisigError::EntryArchived)?;
         let recovery_delay: u64 = env.storage().instance().get(&RECOVERY_DELAY).unwrap();
-        let recovery_request: Option<RecoveryRequest> = env.storage().instance().get(&RECOVERY_REQUEST);
+        let recovery_request: Option<RecoveryRequest> =
+            env.storage().instance().get(&RECOVERY_REQUEST);
 
         Ok((recovery_address, recovery_delay, recovery_request))
     }
@@ -972,17 +1155,21 @@ impl MultisigSafe {
     pub fn is_owner(env: Env, address: Address) -> Result<bool, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         match env.storage().instance().get(&OWNERS) {
             Some(owners) => Ok(owners.contains(&address)),
             None => Err(MultisigError::EntryArchived),
         }
     }
 
-    pub fn has_signed(env: Env, transaction_id: u64, signer: Address) -> Result<bool, MultisigError> {
+    pub fn has_signed(
+        env: Env,
+        transaction_id: u64,
+        signer: Address,
+    ) -> Result<bool, MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-        
+
         Ok(env
             .storage()
             .instance()
@@ -991,16 +1178,12 @@ impl MultisigSafe {
 
     /// Helper function to check if address is an owner
     fn require_owner(env: &Env, address: &Address) -> Result<(), MultisigError> {
-        let owners: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&OWNERS)
-            .unwrap_or_default();
-        
+        let owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
+
         if !owners.contains(address) {
             return Err(MultisigError::Unauthorized);
         }
-        
+
         Ok(())
     }
 
@@ -1009,43 +1192,55 @@ impl MultisigSafe {
         if extend_ledgers < MIN_TTL_EXTENSION {
             return Err(MultisigError::InvalidTtlExtension);
         }
-        
-        env.storage().instance().extend_ttl(env.ledger().sequence(), extend_ledgers);
-        env.storage().instance().set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
-        
+
+        env.storage()
+            .instance()
+            .extend_ttl(env.ledger().sequence(), extend_ledgers);
+        env.storage()
+            .instance()
+            .set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+
         Ok(())
     }
 
     /// Check and extend instance TTL automatically
     fn auto_extend_instance_ttl(env: &Env) -> Result<(), MultisigError> {
-        let last_extension: u32 = env.storage().instance().get(&LAST_TTL_EXTENSION).unwrap_or(0);
+        let last_extension: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_TTL_EXTENSION)
+            .unwrap_or(0);
         let current_ledger = env.ledger().sequence();
         let ledgers_since_extension = current_ledger.saturating_sub(last_extension);
-        
+
         // Auto-extend if we've used more than half of the TTL
         if ledgers_since_extension > DEFAULT_INSTANCE_TTL / 2 {
             Self::extend_instance_ttl(env, DEFAULT_INSTANCE_TTL)?;
         }
-        
+
         Ok(())
     }
 
     /// Calculate minimum balance requirements for storage
     pub fn calculate_minimum_balance(env: &Env) -> Result<i128, MultisigError> {
         let owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
-        let tx_count: u64 = env.storage().instance().get(&TRANSACTION_COUNT).unwrap_or(0);
-        
+        let tx_count: u64 = env
+            .storage()
+            .instance()
+            .get(&TRANSACTION_COUNT)
+            .unwrap_or(0);
+
         // Base storage cost estimation (rough calculation)
         // Each Address: ~32 bytes, each transaction: ~200 bytes, overhead: ~1000 bytes
         let storage_bytes = 1000 + (owners.len() * 32) + (tx_count as usize * 200);
-        
+
         // Convert to stroops (1 XLM = 10^7 stroops)
         // Rough estimate: 1 byte = 1 stroop for storage cost
         let base_cost = storage_bytes as i128;
-        
+
         // Add buffer for safety
         let buffered_cost = base_cost * RENT_BUFFER_MULTIPLIER as i128;
-        
+
         Ok(buffered_cost)
     }
 
@@ -1053,23 +1248,23 @@ impl MultisigSafe {
     pub fn top_up_rent(env: Env, caller: Address, amount: i128) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         if amount <= 0 {
             return Err(MultisigError::InsufficientBalanceForRent);
         }
-        
+
         // Transfer XLM to contract for rent
         let token_client = token::Client::new(&env, &env.current_contract_address());
         token_client.transfer(&caller, &env.current_contract_address(), &amount);
-        
+
         // Update rent balance
         let current_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
         let new_balance = current_balance + amount;
         env.storage().instance().set(&RENT_BALANCE, &new_balance);
-        
+
         // Auto-extend persistent storage TTL if needed
         Self::extend_persistent_ttl(&env, DEFAULT_PERSISTENT_TTL)?;
-        
+
         Ok(())
     }
 
@@ -1078,10 +1273,12 @@ impl MultisigSafe {
         if extend_ledgers < MIN_TTL_EXTENSION {
             return Err(MultisigError::InvalidTtlExtension);
         }
-        
+
         // Extend TTL for all persistent entries
-        env.storage().persistent().extend_ttl(env.ledger().sequence(), extend_ledgers);
-        
+        env.storage()
+            .persistent()
+            .extend_ttl(env.ledger().sequence(), extend_ledgers);
+
         Ok(())
     }
 
@@ -1092,41 +1289,79 @@ impl MultisigSafe {
 
     /// Get TTL information
     pub fn get_ttl_info(env: Env) -> Result<(u32, u32, i128), MultisigError> {
-        let last_extension: u32 = env.storage().instance().get(&LAST_TTL_EXTENSION).unwrap_or(0);
+        let last_extension: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_TTL_EXTENSION)
+            .unwrap_or(0);
         let current_ledger = env.ledger().sequence();
-        let remaining_ttl = DEFAULT_INSTANCE_TTL.saturating_sub(current_ledger.saturating_sub(last_extension));
+        let remaining_ttl =
+            DEFAULT_INSTANCE_TTL.saturating_sub(current_ledger.saturating_sub(last_extension));
         let rent_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
-        
+
         Ok((last_extension, remaining_ttl, rent_balance))
     }
 
+    /// Get time-lock recovery status information
+    pub fn get_time_lock_status(env: Env) -> Result<(u32, u32, bool, Address), MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let last_active: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_ACTIVE_LEDGER)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_active = current_ledger.saturating_sub(last_active);
+        let is_recovery_available = ledgers_since_active >= TIME_LOCK_PERIOD as u32;
+
+        let recovery_key: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_KEY)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        Ok((
+            last_active,
+            ledgers_since_active,
+            is_recovery_available,
+            recovery_key,
+        ))
+    }
+
     /// Store data in persistent storage with automatic TTL management
-    pub fn store_persistent_data(env: Env, caller: Address, key: Symbol, value: Bytes) -> Result<(), MultisigError> {
+    pub fn store_persistent_data(
+        env: Env,
+        caller: Address,
+        key: Symbol,
+        value: Bytes,
+    ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_owner(&env, &caller)?;
-        
+
         // Check minimum balance requirements
         let min_balance = Self::calculate_minimum_balance(&env)?;
         let current_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
-        
+
         if current_balance < min_balance {
             return Err(MultisigError::InsufficientBalanceForRent);
         }
-        
+
         // Store in persistent storage
         let persistent_key = (PERSISTENT_DATA, key);
         env.storage().persistent().set(&persistent_key, &value);
-        
+
         // Auto-extend TTL
         Self::extend_persistent_ttl(&env, DEFAULT_PERSISTENT_TTL)?;
-        
+
         Ok(())
     }
 
     /// Retrieve data from persistent storage with archival check
     pub fn get_persistent_data(env: Env, key: Symbol) -> Result<Bytes, MultisigError> {
         let persistent_key = (PERSISTENT_DATA, key);
-        
+
         // Check if entry exists and is not archived
         match env.storage().persistent().get(&persistent_key) {
             Some(value) => Ok(value),
@@ -1155,18 +1390,22 @@ mod test {
                 1,
                 recovery_address.clone(),
                 recovery_delay,
-            ).unwrap();
+                Address::generate(&env), // recovery_key
+            )
+            .unwrap();
         });
 
         // Property 1: Recovery cannot be executed immediately after initiation
         env.as_contract(&env.current_contract_address(), || {
-            MultisigSafe::initiate_recovery(env.clone(), owner.clone(), Address::generate(&env)).unwrap();
+            MultisigSafe::initiate_recovery(env.clone(), owner.clone(), Address::generate(&env))
+                .unwrap();
             let result = MultisigSafe::execute_recovery(env.clone());
             assert_eq!(result, Err(MultisigError::RecoveryDelayNotPassed));
         });
 
         // Property 2: Recovery can be executed exactly after delay
-        env.ledger().with_mut(|li| li.timestamp += recovery_delay + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp += recovery_delay + 1);
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::execute_recovery(env.clone()).unwrap();
         });
@@ -1177,7 +1416,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1186,10 +1425,13 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+                Address::generate(&env), // recovery_key
+            )
+            .unwrap();
+
             // Test TTL info retrieval
-            let (last_ext, remaining_ttl, rent_bal) = MultisigSafe::get_ttl_info(env.clone()).unwrap();
+            let (last_ext, remaining_ttl, rent_bal) =
+                MultisigSafe::get_ttl_info(env.clone()).unwrap();
             assert_eq!(last_ext, 0);
             assert!(rent_bal >= 0);
             assert!(remaining_ttl > 0);
@@ -1201,7 +1443,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1210,12 +1452,14 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+                Address::generate(&env), // recovery_key
+            )
+            .unwrap();
+
             // Test rent balance initially
             let initial_balance = MultisigSafe::get_rent_balance(env.clone()).unwrap();
             assert_eq!(initial_balance, 0);
-            
+
             // Test minimum balance calculation
             let min_balance = MultisigSafe::calculate_minimum_balance(&env).unwrap();
             assert!(min_balance > 0);
@@ -1227,7 +1471,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1236,8 +1480,10 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+                Address::generate(&env), // recovery_key
+            )
+            .unwrap();
+
             // Test persistent data storage (should fail without rent)
             let test_key = symbol_short!("TEST_KEY");
             let test_value = Bytes::from_slice(&env, b"test_data");
@@ -1248,7 +1494,7 @@ mod test {
                 test_value,
             );
             assert_eq!(result, Err(MultisigError::InsufficientBalanceForRent));
-            
+
             // Test retrieval of non-existent data
             let result = MultisigSafe::get_persistent_data(env.clone(), test_key);
             assert_eq!(result, Err(MultisigError::EntryArchived));
@@ -1260,7 +1506,7 @@ mod test {
         let env = Env::default();
         let owner = Address::generate(&env);
         let recovery_address = Address::generate(&env);
-        
+
         // Setup contract
         env.as_contract(&env.current_contract_address(), || {
             MultisigSafe::__init__(
@@ -1269,16 +1515,18 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
-            ).unwrap();
-            
+                Address::generate(&env), // recovery_key
+            )
+            .unwrap();
+
             // Simulate ledger progression to trigger auto-extension
             env.ledger().with_mut(|li| {
                 li.sequence += DEFAULT_INSTANCE_TTL / 2 + 1000;
             });
-            
+
             // Call any function to trigger auto-extension
             let _ = MultisigSafe::get_owners(env.clone()).unwrap();
-            
+
             // Verify TTL was extended
             let (last_ext, remaining_ttl, _) = MultisigSafe::get_ttl_info(env.clone()).unwrap();
             assert!(last_ext > 0);
