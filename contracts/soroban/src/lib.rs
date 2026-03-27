@@ -148,6 +148,10 @@ const UPGRADE_STATE: Symbol = symbol_short!("UPG_STATE");
 const IS_FROZEN: Symbol = symbol_short!("IS_FROZEN");
 const FREEZE_UNTIL: Symbol = symbol_short!("FREEZE_UNTIL");
 const FREEZE_REASON: Symbol = symbol_short!("FREEZE_RSN");
+const LAST_HEARTBEAT: Symbol = symbol_short!("LAST_HRTBT");
+const RECOVERY_PATH_ADDRESS: Symbol = symbol_short!("REC_PATH_ADDR");
+const LAST_ACTIVE_LEDGER: Symbol = symbol_short!("LAST_ACTIVE");
+const RECOVERY_KEY: Symbol = symbol_short!("RECOVERY_KEY");
 
 // Event topics
 const CONFIG_CHANGE_EVENT: Symbol = symbol_short!("CONFIG_CHANGE");
@@ -166,6 +170,8 @@ const CURRENT_VERSION: u32 = 1; // Current contract version
 const MIN_FREEZE_DURATION: u64 = 3600; // 1 hour in seconds
 const MAX_FREEZE_DURATION: u64 = 2592000; // 30 days in seconds
 const FREEZE_THRESHOLD_RATIO: u32 = 3; // Freeze requires 1/3 of normal threshold
+const RECOVERY_PERIOD: u64 = 2592000; // 30 days in seconds (time-lock period)
+const TIME_LOCK_PERIOD: u64 = 15552000; // 180 days in ledgers (6 months)
 
 #[contract]
 pub struct MultisigSafe;
@@ -179,6 +185,8 @@ impl MultisigSafe {
         threshold_config: ThresholdConfig,
         recovery_address: Address,
         recovery_delay: u64,
+        recovery_path_address: Address,
+        recovery_key: Address,
     ) -> Result<(), MultisigError> {
         if signers.is_empty() {
             return Err(MultisigError::InvalidThreshold);
@@ -189,6 +197,11 @@ impl MultisigSafe {
         }
 
         if signers.len() as u32 > MAX_OWNERS {
+        if threshold == 0 || threshold > owners.len() as u32 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        if owners.len() as u32 > MAX_OWNERS {
             return Err(MultisigError::MaximumOwnersExceeded);
         }
 
@@ -224,12 +237,19 @@ impl MultisigSafe {
             .instance()
             .set(&THRESHOLD, &threshold_config.current);
         env.storage().instance().set(&OWNERS, &signers);
+        // Store owners in instance storage with TTL
+        env.storage().instance().set(&OWNERS, &owners);
+        env.storage().instance().set(&THRESHOLD, &threshold);
         env.storage()
             .instance()
             .set(&RECOVERY_ADDRESS, &recovery_address);
         env.storage()
             .instance()
             .set(&RECOVERY_DELAY, &recovery_delay);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_PATH_ADDRESS, &recovery_path_address);
+        env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
         env.storage().instance().set(&TRANSACTION_COUNT, &0u64);
 
         // Initialize rent balance tracking
@@ -237,6 +257,15 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+
+        // Initialize heartbeat timer
+        env.storage()
+            .instance()
+            .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+        // Initialize time-lock recovery tracking
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         // Set contract version for migration tracking
         env.storage()
@@ -267,6 +296,7 @@ impl MultisigSafe {
     ) -> Result<u64, MultisigError> {
         caller.require_auth();
         Self::require_signer(&env, &caller)?;
+        Self::require_owner(&env, &caller)?;
 
         // Check if wallet is frozen
         Self::check_frozen_status(&env)?;
@@ -313,6 +343,7 @@ impl MultisigSafe {
     ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_signer(&env, &caller)?;
+        Self::require_owner(&env, &caller)?;
 
         // Check if wallet is frozen
         Self::check_frozen_status(&env)?;
@@ -420,6 +451,15 @@ impl MultisigSafe {
         env.storage()
             .instance()
             .set(&(TRANSACTIONS, transaction_id), &transaction);
+
+        // Reset heartbeat timer on successful transaction execution
+        env.storage()
+            .instance()
+            .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+        // Reset activity timer on successful transaction execution
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
 
         Ok(())
     }
@@ -599,6 +639,7 @@ impl MultisigSafe {
 
         Ok(())
     }
+        let mut owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
 
     /// Add a new signer
     pub fn add_signer(
@@ -671,6 +712,11 @@ impl MultisigSafe {
         env: Env,
         caller: Address,
         signer_to_remove: Address,
+    /// Remove an owner
+    pub fn remove_owner(
+        env: Env,
+        caller: Address,
+        owner_to_remove: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_signer(&env, &caller)?;
@@ -747,6 +793,7 @@ impl MultisigSafe {
     }
 
     /// Change the signature threshold (legacy function for backward compatibility)
+    /// Change the signature threshold
     pub fn change_threshold(
         env: Env,
         caller: Address,
@@ -898,6 +945,10 @@ impl MultisigSafe {
             return Err(MultisigError::InvalidThreshold);
         }
 
+        if new_owners.len() as u32 > MAX_OWNERS {
+            return Err(MultisigError::MaximumOwnersExceeded);
+        }
+
         // Update owners and threshold
         env.storage().instance().set(&OWNERS, &new_owners);
         env.storage().instance().set(&THRESHOLD, &new_threshold);
@@ -928,6 +979,213 @@ impl MultisigSafe {
             .publish((UNFREEZE_EVENT, symbol_short!("RECOVERY")), unfreeze_event);
 
         Ok(())
+    }
+
+    /// Heartbeat function to reset the time-lock timer
+    /// Can be called by any primary owner to prove activity
+    /// Heartbeat function to reset the time-lock timer without moving funds
+    /// Can be called by any owner to prove activity
+    pub fn heartbeat(env: Env, caller: Address) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        // Update last heartbeat timestamp
+        env.storage()
+            .instance()
+            .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+        // Update last activity ledger
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
+
+        Ok(())
+    }
+
+    /// Cancel recovery function for primary signers
+    /// Resets the heartbeat timer and cancels any pending recovery
+    pub fn cancel_time_lock_recovery(env: Env, caller: Address) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        // Reset heartbeat timer
+        env.storage()
+            .instance()
+            .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+
+        // Clear any ongoing recovery request
+        env.storage().instance().remove(&RECOVERY_REQUEST);
+
+        Ok(())
+    }
+
+    /// Time-lock recovery function that activates after RECOVERY_PERIOD
+    /// Recovery address gains master weight to reset signers after period expires
+    /// Time-lock recovery function that activates after inactivity period
+    /// Can only be called by the recovery key after time-lock period expires
+    pub fn time_lock_recovery(
+        env: Env,
+        caller: Address,
+        new_owners: Vec<Address>,
+        new_threshold: u32,
+        new_recovery_address: Address,
+        new_recovery_path_address: Address,
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+
+        // Verify caller is the recovery path address
+        let recovery_path_address: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_PATH_ADDRESS)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        if caller != recovery_path_address {
+            return Err(MultisigError::Unauthorized);
+        }
+
+        // Check if recovery period has passed
+        let last_heartbeat: u64 = env
+            .storage()
+            .instance()
+            .get(&LAST_HEARTBEAT)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_time = env.ledger().timestamp();
+
+        if current_time.saturating_sub(last_heartbeat) < RECOVERY_PERIOD {
+        new_recovery_key: Address,
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+
+        // Verify caller is the recovery key
+        let recovery_key: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_KEY)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        if caller != recovery_key {
+            return Err(MultisigError::Unauthorized);
+        }
+
+        // Check if time-lock period has passed
+        let last_active: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_ACTIVE_LEDGER)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_ledger = env.ledger().sequence();
+
+        if current_ledger.saturating_sub(last_active) < TIME_LOCK_PERIOD as u32 {
+            return Err(MultisigError::RecoveryDelayNotPassed);
+        }
+
+        // Validate new owners and threshold
+        if new_owners.is_empty() || new_threshold == 0 || new_threshold > new_owners.len() as u32 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        if new_owners.len() as u32 > MAX_OWNERS {
+            return Err(MultisigError::MaximumOwnersExceeded);
+        }
+
+        // Update wallet state
+        env.storage().instance().set(&OWNERS, &new_owners);
+        env.storage().instance().set(&THRESHOLD, &new_threshold);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_ADDRESS, &new_recovery_address);
+        env.storage()
+            .instance()
+            .set(&RECOVERY_PATH_ADDRESS, &new_recovery_path_address);
+
+        // Reset heartbeat timer
+        env.storage()
+            .instance()
+            .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
+            .set(&RECOVERY_KEY, &new_recovery_key);
+
+        // Reset activity timer
+        env.storage()
+            .instance()
+            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
+
+        // Clear any ongoing recovery
+        env.storage().instance().remove(&RECOVERY_REQUEST);
+
+        // Auto-unfreeze wallet after successful time-lock recovery
+        env.storage().instance().set(&IS_FROZEN, &false);
+        env.storage().instance().set(&FREEZE_UNTIL, &0u64);
+        env.storage().instance().set(
+            &FREEZE_REASON,
+            &Bytes::from_slice(&env, b"Auto-unfreeze: time-lock recovery executed"),
+        );
+
+        // Emit time-lock recovery event
+        let unfreeze_event = UnfreezeEvent {
+            unfrozen_by: caller.clone(),
+            unfrozen_at: env.ledger().timestamp(),
+            reason: Bytes::from_slice(&env, b"Time-lock recovery executed"),
+        };
+
+        env.events()
+            .publish((UNFREEZE_EVENT, symbol_short!("TIME_LOCK")), unfreeze_event);
+
+        Ok(())
+    }
+
+    /// Check if recovery path is currently active (has master weight)
+    pub fn is_recovery_path_active(env: Env) -> Result<bool, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let last_heartbeat: u64 = env
+            .storage()
+            .instance()
+            .get(&LAST_HEARTBEAT)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_time = env.ledger().timestamp();
+
+        Ok(current_time.saturating_sub(last_heartbeat) >= RECOVERY_PERIOD)
+    }
+
+    /// Get time-lock recovery status information
+    pub fn get_recovery_status(env: Env) -> Result<(u64, u64, bool, Address), MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let last_heartbeat: u64 = env
+            .storage()
+            .instance()
+            .get(&LAST_HEARTBEAT)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_time = env.ledger().timestamp();
+        let time_since_heartbeat = current_time.saturating_sub(last_heartbeat);
+        let is_recovery_active = time_since_heartbeat >= RECOVERY_PERIOD;
+
+        let recovery_path_address: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_PATH_ADDRESS)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        Ok((
+            last_heartbeat,
+            time_since_heartbeat,
+            is_recovery_active,
+            recovery_path_address,
+        ))
     }
 
     /// Freeze the wallet with lower threshold requirement
@@ -1351,6 +1609,58 @@ impl MultisigSafe {
         env: Env,
         upgrade_tx_id: u64,
         owner: Address,
+    ) -> Result<bool, MultisigError> {
+        let upgrade_key = (UPGRADE_EVENT, upgrade_tx_id, owner);
+        Ok(env.storage().instance().has(&upgrade_key))
+    }
+
+    /// Get current contract version
+    pub fn get_version(env: Env) -> Result<u32, MultisigError> {
+        match env.storage().instance().get(&CONTRACT_VERSION) {
+            Some(version) => Ok(version),
+            None => Ok(0), // Default to version 0 if not set (legacy contracts)
+        }
+    }
+
+    /// View functions
+    pub fn get_owners(env: Env) -> Result<Vec<Address>, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        match env.storage().instance().get(&OWNERS) {
+            Some(owners) => Ok(owners),
+            None => Err(MultisigError::EntryArchived),
+        }
+    }
+
+    pub fn get_threshold(env: Env) -> Result<u32, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        match env.storage().instance().get(&THRESHOLD) {
+            Some(threshold) => Ok(threshold),
+            None => Err(MultisigError::EntryArchived),
+        }
+    }
+
+    pub fn get_transaction(env: Env, transaction_id: u64) -> Result<Transaction, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        match env
+            .storage()
+            .instance()
+            .get(&(TRANSACTIONS, transaction_id))
+        {
+            Some(transaction) => Ok(transaction),
+            None => Err(MultisigError::InvalidTransactionId),
+        }
+    }
+
+    pub fn get_recovery_info(
+        env: Env,
+        upgrade_tx_id: u64,
+        owner: Address,
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
 
@@ -1358,6 +1668,152 @@ impl MultisigSafe {
             .ok_or(MultisigError::EntryArchived)?;
         
         Ok(signers.iter().any(|signer| signer.address == address))
+
+        let recovery_address: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_ADDRESS)
+            .ok_or(MultisigError::EntryArchived)?;
+        let recovery_delay: u64 = env.storage().instance().get(&RECOVERY_DELAY).unwrap();
+        let recovery_request: Option<RecoveryRequest> =
+            env.storage().instance().get(&RECOVERY_REQUEST);
+
+        Ok((recovery_address, recovery_delay, recovery_request))
+    }
+
+    pub fn is_owner(env: Env, address: Address) -> Result<bool, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        match env.storage().instance().get(&OWNERS) {
+            Some(owners) => Ok(owners.contains(&address)),
+            None => Err(MultisigError::EntryArchived),
+        }
+    }
+
+    pub fn has_signed(
+        env: Env,
+        transaction_id: u64,
+        signer: Address,
+    ) -> Result<bool, MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        Ok(env
+            .storage()
+            .instance()
+            .has(&(SIGNATURES, transaction_id, signer)))
+    }
+
+    /// Helper function to check if address is an owner
+    fn require_owner(env: &Env, address: &Address) -> Result<(), MultisigError> {
+        let owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
+
+        if !owners.contains(address) {
+            return Err(MultisigError::Unauthorized);
+        }
+
+        Ok(())
+    }
+
+    /// Extend instance storage TTL
+    fn extend_instance_ttl(env: &Env, extend_ledgers: u32) -> Result<(), MultisigError> {
+        if extend_ledgers < MIN_TTL_EXTENSION {
+            return Err(MultisigError::InvalidTtlExtension);
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(env.ledger().sequence(), extend_ledgers);
+        env.storage()
+            .instance()
+            .set(&LAST_TTL_EXTENSION, &env.ledger().sequence());
+
+        Ok(())
+    }
+
+    /// Check and extend instance TTL automatically
+    fn auto_extend_instance_ttl(env: &Env) -> Result<(), MultisigError> {
+        let last_extension: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_TTL_EXTENSION)
+            .unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_extension = current_ledger.saturating_sub(last_extension);
+
+        // Auto-extend if we've used more than half of the TTL
+        if ledgers_since_extension > DEFAULT_INSTANCE_TTL / 2 {
+            Self::extend_instance_ttl(env, DEFAULT_INSTANCE_TTL)?;
+        }
+
+        Ok(())
+    }
+
+    /// Calculate minimum balance requirements for storage
+    pub fn calculate_minimum_balance(env: &Env) -> Result<i128, MultisigError> {
+        let owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
+        let tx_count: u64 = env
+            .storage()
+            .instance()
+            .get(&TRANSACTION_COUNT)
+            .unwrap_or(0);
+
+        // Base storage cost estimation (rough calculation)
+        // Each Address: ~32 bytes, each transaction: ~200 bytes, overhead: ~1000 bytes
+        let storage_bytes = 1000 + (owners.len() * 32) + (tx_count as usize * 200);
+
+        // Convert to stroops (1 XLM = 10^7 stroops)
+        // Rough estimate: 1 byte = 1 stroop for storage cost
+        let base_cost = storage_bytes as i128;
+
+        // Add buffer for safety
+        let buffered_cost = base_cost * RENT_BUFFER_MULTIPLIER as i128;
+
+        Ok(buffered_cost)
+    }
+
+    /// Top up rent for persistent storage
+    pub fn top_up_rent(env: Env, caller: Address, amount: i128) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_owner(&env, &caller)?;
+
+        if amount <= 0 {
+            return Err(MultisigError::InsufficientBalanceForRent);
+        }
+
+        // Transfer XLM to contract for rent
+        let token_client = token::Client::new(&env, &env.current_contract_address());
+        token_client.transfer(&caller, &env.current_contract_address(), &amount);
+
+        // Update rent balance
+        let current_balance: i128 = env.storage().instance().get(&RENT_BALANCE).unwrap_or(0);
+        let new_balance = current_balance + amount;
+        env.storage().instance().set(&RENT_BALANCE, &new_balance);
+
+        // Auto-extend persistent storage TTL if needed
+        Self::extend_persistent_ttl(&env, DEFAULT_PERSISTENT_TTL)?;
+
+        Ok(())
+    }
+
+    /// Extend persistent storage TTL
+    fn extend_persistent_ttl(env: &Env, extend_ledgers: u32) -> Result<(), MultisigError> {
+        if extend_ledgers < MIN_TTL_EXTENSION {
+            return Err(MultisigError::InvalidTtlExtension);
+        }
+
+        // Extend TTL for all persistent entries
+        env.storage()
+            .persistent()
+            .extend_ttl(env.ledger().sequence(), extend_ledgers);
+
+        Ok(())
+    }
+
+    /// Get current rent balance
+    pub fn get_rent_balance(env: Env) -> Result<i128, MultisigError> {
+        Ok(env.storage().instance().get(&RENT_BALANCE).unwrap_or(0))
     }
     /// Get TTL information
     pub fn get_ttl_info(env: Env) -> Result<(u32, u32, i128), MultisigError> {
@@ -1374,6 +1830,34 @@ impl MultisigSafe {
         Ok((last_extension, remaining_ttl, rent_balance))
     }
 
+    /// Get time-lock recovery status information
+    pub fn get_time_lock_status(env: Env) -> Result<(u32, u32, bool, Address), MultisigError> {
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let last_active: u32 = env
+            .storage()
+            .instance()
+            .get(&LAST_ACTIVE_LEDGER)
+            .ok_or(MultisigError::EntryArchived)?;
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_active = current_ledger.saturating_sub(last_active);
+        let is_recovery_available = ledgers_since_active >= TIME_LOCK_PERIOD as u32;
+
+        let recovery_key: Address = env
+            .storage()
+            .instance()
+            .get(&RECOVERY_KEY)
+            .ok_or(MultisigError::InvalidRecoveryAddress)?;
+
+        Ok((
+            last_active,
+            ledgers_since_active,
+            is_recovery_available,
+            recovery_key,
+        ))
+    }
+
     /// Store data in persistent storage with automatic TTL management
     pub fn store_persistent_data(
         env: Env,
@@ -1383,6 +1867,7 @@ impl MultisigSafe {
     ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_signer(&env, &caller)?;
+        Self::require_owner(&env, &caller)?;
 
         // Check minimum balance requirements
         let min_balance = Self::calculate_minimum_balance(&env)?;
@@ -1434,6 +1919,8 @@ mod test {
                 1,
                 recovery_address.clone(),
                 recovery_delay,
+                Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
         });
@@ -1468,6 +1955,8 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
+                Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1494,6 +1983,8 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
+                Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1521,6 +2012,8 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
+                Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1555,6 +2048,8 @@ mod test {
                 1,
                 recovery_address.clone(),
                 86400,
+                Address::generate(&env), // recovery_path_address
+                Address::generate(&env), // recovery_key
             )
             .unwrap();
 
@@ -1570,6 +2065,332 @@ mod test {
             let (last_ext, remaining_ttl, _) = MultisigSafe::get_ttl_info(env.clone()).unwrap();
             assert!(last_ext > 0);
             assert!(remaining_ttl > DEFAULT_INSTANCE_TTL / 2);
+        });
+    }
+
+    #[test]
+    fn test_heartbeat_functionality() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Test heartbeat functionality
+            MultisigSafe::heartbeat(env.clone(), owner.clone()).unwrap();
+
+            // Check that timer was reset
+            let (last_heartbeat, time_since, is_active, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert_eq!(time_since, 0);
+            assert!(!is_active);
+        });
+    }
+
+    #[test]
+    fn test_time_lock_recovery_before_period() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Try time-lock recovery before period expires (should fail)
+            let new_owners = vec![Address::generate(&env)];
+            let result = MultisigSafe::time_lock_recovery(
+                env.clone(),
+                recovery_path_address.clone(),
+                new_owners.clone(),
+                1u32,
+                Address::generate(&env),
+                Address::generate(&env),
+            );
+            assert_eq!(result, Err(MultisigError::RecoveryDelayNotPassed));
+        });
+    }
+
+    #[test]
+    fn test_time_lock_recovery_after_period() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Simulate time passing beyond RECOVERY_PERIOD
+            env.ledger().with_mut(|li| {
+                li.timestamp += RECOVERY_PERIOD + 1000; // RECOVERY_PERIOD + buffer
+            });
+
+            // Now time-lock recovery should work
+            let new_owners = vec![Address::generate(&env)];
+            let new_threshold = 1u32;
+            let new_recovery_address = Address::generate(&env);
+            let new_recovery_path_address = Address::generate(&env);
+
+            MultisigSafe::time_lock_recovery(
+                env.clone(),
+                recovery_path_address.clone(),
+                new_owners.clone(),
+                new_threshold,
+                new_recovery_address.clone(),
+                new_recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Verify new state
+            assert_eq!(MultisigSafe::get_owners(env.clone()).unwrap(), new_owners);
+            assert_eq!(MultisigSafe::get_threshold(env.clone()).unwrap(), new_threshold);
+            
+            let (addr, _, _) = MultisigSafe::get_recovery_info(env.clone()).unwrap();
+            assert_eq!(addr, new_recovery_address);
+
+            // Verify timer was reset
+            let (last_heartbeat, time_since, is_active, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert_eq!(time_since, 0);
+            assert!(!is_active);
+        });
+    }
+
+    #[test]
+    fn test_time_lock_recovery_unauthorized() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Simulate time passing beyond RECOVERY_PERIOD
+            env.ledger().with_mut(|li| {
+                li.timestamp += RECOVERY_PERIOD + 1000; // RECOVERY_PERIOD + buffer
+            });
+
+            // Try time-lock recovery with wrong caller (should fail)
+            let unauthorized_caller = Address::generate(&env);
+            let new_owners = vec![Address::generate(&env)];
+            let result = MultisigSafe::time_lock_recovery(
+                env.clone(),
+                unauthorized_caller,
+                new_owners.clone(),
+                1u32,
+                Address::generate(&env),
+                Address::generate(&env),
+            );
+            assert_eq!(result, Err(MultisigError::Unauthorized));
+        });
+    }
+
+    #[test]
+    fn test_transaction_execution_resets_timer() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Get initial timer state
+            let (initial_last_heartbeat, _, _, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+
+            // Simulate some time passing
+            env.ledger().with_mut(|li| {
+                li.timestamp += 1000;
+            });
+
+            // Submit and execute a transaction
+            let destination = Address::generate(&env);
+            let amount = 1000i128;
+            let data = Bytes::from_array(&env, &[1, 2, 3, 4]);
+            let expires_at = env.ledger().timestamp() + 3600;
+
+            let tx_id = MultisigSafe::submit_transaction(
+                env.clone(),
+                destination,
+                amount,
+                data,
+                expires_at,
+            )
+            .unwrap();
+
+            // Check that timer was reset after execution
+            let (new_last_heartbeat, time_since, _, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert!(new_last_heartbeat > initial_last_heartbeat);
+            assert_eq!(time_since, 0);
+        });
+    }
+
+    #[test]
+    fn test_cancel_time_lock_recovery() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Simulate some time passing
+            env.ledger().with_mut(|li| {
+                li.timestamp += 1000;
+            });
+
+            // Cancel recovery
+            MultisigSafe::cancel_time_lock_recovery(env.clone(), owner.clone()).unwrap();
+
+            // Check that timer was reset
+            let (last_heartbeat, time_since, is_active, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert_eq!(time_since, 0);
+            assert!(!is_active);
+        });
+    }
+
+    #[test]
+    fn test_recovery_status_view() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Test initial status
+            let (last_heartbeat, time_since, is_active, rec_path_addr) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert_eq!(time_since, 0);
+            assert!(!is_active);
+            assert_eq!(rec_path_addr, recovery_path_address);
+
+            // Simulate some time passing
+            env.ledger().with_mut(|li| {
+                li.timestamp += 1000;
+            });
+
+            // Check updated status
+            let (last_heartbeat2, time_since2, is_active2, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert_eq!(last_heartbeat2, last_heartbeat); // Same initial timestamp
+            assert_eq!(time_since2, 1000);
+            assert!(!is_active2); // Still not active since RECOVERY_PERIOD is much larger
+
+            // Simulate passing beyond RECOVERY_PERIOD
+            env.ledger().with_mut(|li| {
+                li.timestamp += RECOVERY_PERIOD; // RECOVERY_PERIOD
+            });
+
+            // Check that recovery is now available
+            let (_, time_since3, is_active3, _) = 
+                MultisigSafe::get_recovery_status(env.clone()).unwrap();
+            assert!(time_since3 >= RECOVERY_PERIOD);
+            assert!(is_active3);
+        });
+    }
+
+    #[test]
+    fn test_is_recovery_path_active() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let recovery_path_address = Address::generate(&env);
+
+        // Setup contract
+        env.as_contract(&env.current_contract_address(), || {
+            MultisigSafe::__init__(
+                env.clone(),
+                vec![&env, owner.clone()],
+                1,
+                recovery_address.clone(),
+                86400,
+                recovery_path_address.clone(),
+            )
+            .unwrap();
+
+            // Test initially not active
+            assert!(!MultisigSafe::is_recovery_path_active(env.clone()).unwrap());
+
+            // Simulate time passing beyond RECOVERY_PERIOD
+            env.ledger().with_mut(|li| {
+                li.timestamp += RECOVERY_PERIOD + 1000; // RECOVERY_PERIOD + buffer
+            });
+
+            // Test now active
+            assert!(MultisigSafe::is_recovery_path_active(env.clone()).unwrap();
         });
     }
 }

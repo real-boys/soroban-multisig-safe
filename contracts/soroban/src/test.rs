@@ -27,6 +27,7 @@ mod tests {
         let threshold = 2u32;
         let recovery_address = Address::generate(&env);
         let recovery_delay = 86400u64; // 24 hours
+        let recovery_key = Address::generate(&env);
 
         MultisigSafe::__init(
             env.clone(),
@@ -34,13 +35,14 @@ mod tests {
             threshold,
             recovery_address.clone(),
             recovery_delay,
+            recovery_key.clone(),
         )
         .unwrap();
 
         // Verify initialization
         assert_eq!(MultisigSafe::get_owners(env.clone()).unwrap(), owners);
         assert_eq!(MultisigSafe::get_threshold(env.clone()).unwrap(), threshold);
-        
+
         let (addr, delay, req) = MultisigSafe::get_recovery_info(env.clone()).unwrap();
         assert_eq!(addr, recovery_address);
         assert_eq!(delay, recovery_delay);
@@ -62,6 +64,7 @@ mod tests {
                 0u32,
                 recovery_address.clone(),
                 recovery_delay,
+                Address::generate(&env), // recovery_key
             ),
             Err(MultisigError::InvalidThreshold)
         );
@@ -74,6 +77,7 @@ mod tests {
                 4u32,
                 recovery_address.clone(),
                 recovery_delay,
+                recovery_key.clone(),
             ),
             Err(MultisigError::InvalidThreshold)
         );
@@ -86,6 +90,7 @@ mod tests {
                 2u32,
                 recovery_address.clone(),
                 3600u64,
+                recovery_key.clone(),
             ),
             Err(MultisigError::InvalidTimeDelay)
         );
@@ -243,8 +248,11 @@ mod tests {
 
         // Verify new state
         assert_eq!(MultisigSafe::get_owners(env.clone()).unwrap(), new_owners);
-        assert_eq!(MultisigSafe::get_threshold(env.clone()).unwrap(), new_threshold);
-        
+        assert_eq!(
+            MultisigSafe::get_threshold(env.clone()).unwrap(),
+            new_threshold
+        );
+
         let (addr, _, _) = MultisigSafe::get_recovery_info(env.clone()).unwrap();
         assert_eq!(addr, new_recovery_address);
     }
@@ -276,14 +284,9 @@ mod tests {
         let data = Bytes::from_array(&env, &[1, 2, 3, 4]);
         let expires_at = env.ledger().timestamp() + 3600;
 
-        let tx_id = MultisigSafe::submit_transaction(
-            env.clone(),
-            destination,
-            amount,
-            data,
-            expires_at,
-        )
-        .unwrap();
+        let tx_id =
+            MultisigSafe::submit_transaction(env.clone(), destination, amount, data, expires_at)
+                .unwrap();
 
         // Test has_signed
         assert!(MultisigSafe::has_signed(env.clone(), tx_id, owners[0].clone()).unwrap());
@@ -304,6 +307,7 @@ mod tests {
             threshold,
             recovery_address,
             recovery_delay,
+            Address::generate(&env), // recovery_key
         )
         .unwrap();
 
@@ -312,60 +316,41 @@ mod tests {
 
         // Test upgrade with insufficient signatures (should fail)
         let new_wasm_hash = Bytes::from_array(&env, &[1, 2, 3, 4, 5]);
-        let result = MultisigSafe::upgrade(
-            env.clone(),
-            owners[0].clone(),
-            new_wasm_hash.clone(),
-        );
+        let result = MultisigSafe::upgrade(env.clone(), owners[0].clone(), new_wasm_hash.clone());
         assert_eq!(result, Err(MultisigError::InsufficientSignatures));
 
         // Test upgrade with invalid (empty) WASM hash
         let empty_hash = Bytes::new(&env);
-        let result = MultisigSafe::upgrade(
-            env.clone(),
-            owners[0].clone(),
-            empty_hash,
-        );
+        let result = MultisigSafe::upgrade(env.clone(), owners[0].clone(), empty_hash);
         assert_eq!(result, Err(MultisigError::InvalidWasmHash));
 
         // Test that upgrade signatures are tracked
         let upgrade_tx_id = env.ledger().sequence();
-        
+
         // First owner signs
-        MultisigSafe::upgrade(
-            env.clone(),
-            owners[0].clone(),
-            new_wasm_hash.clone(),
-        ).unwrap_err(); // Should fail due to insufficient signatures
+        MultisigSafe::upgrade(env.clone(), owners[0].clone(), new_wasm_hash.clone()).unwrap_err(); // Should fail due to insufficient signatures
 
         // Check that first owner has signed
-        assert!(MultisigSafe::has_signed_upgrade(
-            env.clone(),
-            upgrade_tx_id,
-            owners[0].clone()
-        ).unwrap());
+        assert!(
+            MultisigSafe::has_signed_upgrade(env.clone(), upgrade_tx_id, owners[0].clone())
+                .unwrap()
+        );
 
         // Second owner signs (now should succeed)
-        MultisigSafe::upgrade(
-            env.clone(),
-            owners[1].clone(),
-            new_wasm_hash.clone(),
-        ).unwrap();
+        MultisigSafe::upgrade(env.clone(), owners[1].clone(), new_wasm_hash.clone()).unwrap();
 
         // Verify version was incremented
         assert_eq!(MultisigSafe::get_version(env.clone()).unwrap(), 2);
 
         // Verify upgrade signatures were cleaned up
-        assert!(!MultisigSafe::has_signed_upgrade(
-            env.clone(),
-            upgrade_tx_id,
-            owners[0].clone()
-        ).unwrap());
-        assert!(!MultisigSafe::has_signed_upgrade(
-            env.clone(),
-            upgrade_tx_id,
-            owners[1].clone()
-        ).unwrap());
+        assert!(
+            !MultisigSafe::has_signed_upgrade(env.clone(), upgrade_tx_id, owners[0].clone())
+                .unwrap()
+        );
+        assert!(
+            !MultisigSafe::has_signed_upgrade(env.clone(), upgrade_tx_id, owners[1].clone())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -382,6 +367,7 @@ mod tests {
             threshold,
             recovery_address,
             recovery_delay,
+            Address::generate(&env), // recovery_key
         )
         .unwrap();
 
@@ -397,7 +383,8 @@ mod tests {
             amount,
             data.clone(),
             expires_at,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify initial state
         let initial_owners = MultisigSafe::get_owners(env.clone()).unwrap();
@@ -406,26 +393,37 @@ mod tests {
 
         // Perform upgrade
         let new_wasm_hash = Bytes::from_array(&env, &[5, 6, 7, 8, 9]);
-        
+
         // All owners need to sign for upgrade
         for owner in &owners {
-            MultisigSafe::upgrade(
-                env.clone(),
-                owner.clone(),
-                new_wasm_hash.clone(),
-            ).unwrap();
+            MultisigSafe::upgrade(env.clone(), owner.clone(), new_wasm_hash.clone()).unwrap();
         }
 
         // Verify data persistence after upgrade
-        assert_eq!(MultisigSafe::get_owners(env.clone()).unwrap(), initial_owners);
-        assert_eq!(MultisigSafe::get_threshold(env.clone()).unwrap(), initial_threshold);
-        
+        assert_eq!(
+            MultisigSafe::get_owners(env.clone()).unwrap(),
+            initial_owners
+        );
+        assert_eq!(
+            MultisigSafe::get_threshold(env.clone()).unwrap(),
+            initial_threshold
+        );
+
         let post_upgrade_transaction = MultisigSafe::get_transaction(env.clone(), tx_id).unwrap();
-        assert_eq!(post_upgrade_transaction.destination, initial_transaction.destination);
+        assert_eq!(
+            post_upgrade_transaction.destination,
+            initial_transaction.destination
+        );
         assert_eq!(post_upgrade_transaction.amount, initial_transaction.amount);
         assert_eq!(post_upgrade_transaction.data, initial_transaction.data);
-        assert_eq!(post_upgrade_transaction.executed, initial_transaction.executed);
-        assert_eq!(post_upgrade_transaction.signatures, initial_transaction.signatures);
+        assert_eq!(
+            post_upgrade_transaction.executed,
+            initial_transaction.executed
+        );
+        assert_eq!(
+            post_upgrade_transaction.signatures,
+            initial_transaction.signatures
+        );
 
         // Verify recovery info persisted
         let (addr, delay, req) = MultisigSafe::get_recovery_info(env.clone()).unwrap();
@@ -448,25 +446,18 @@ mod tests {
             threshold,
             recovery_address,
             recovery_delay,
+            Address::generate(&env), // recovery_key
         )
         .unwrap();
 
         // Test duplicate signature prevention
         let new_wasm_hash = Bytes::from_array(&env, &[1, 2, 3, 4, 5]);
-        
+
         // First owner signs
-        MultisigSafe::upgrade(
-            env.clone(),
-            owners[0].clone(),
-            new_wasm_hash.clone(),
-        ).unwrap_err(); // Fails due to insufficient signatures
+        MultisigSafe::upgrade(env.clone(), owners[0].clone(), new_wasm_hash.clone()).unwrap_err(); // Fails due to insufficient signatures
 
         // Try to sign again with same owner (should fail)
-        let result = MultisigSafe::upgrade(
-            env.clone(),
-            owners[0].clone(),
-            new_wasm_hash.clone(),
-        );
+        let result = MultisigSafe::upgrade(env.clone(), owners[0].clone(), new_wasm_hash.clone());
         assert_eq!(result, Err(MultisigError::InsufficientSignatures));
     }
 
@@ -484,12 +475,13 @@ mod tests {
             threshold,
             recovery_address,
             recovery_delay,
+            Address::generate(&env), // recovery_key
         )
         .unwrap();
 
         // Set up event capture
         let mut upgrade_events: Vec<UpgradeEvent> = Vec::new(&env);
-        
+
         // Register event listener
         env.events().publish(
             (Symbol::from_str("UPGRADE"), Symbol::from_str("EXECUTED")),
@@ -503,14 +495,10 @@ mod tests {
 
         // Perform upgrade
         let new_wasm_hash = Bytes::from_array(&env, &[9, 10, 11, 12, 13]);
-        
+
         // All owners need to sign for upgrade
         for owner in &owners {
-            MultisigSafe::upgrade(
-                env.clone(),
-                owner.clone(),
-                new_wasm_hash.clone(),
-            ).unwrap();
+            MultisigSafe::upgrade(env.clone(), owner.clone(), new_wasm_hash.clone()).unwrap();
         }
 
         // Verify upgrade was successful
@@ -531,34 +519,293 @@ mod tests {
             threshold,
             recovery_address,
             recovery_delay,
+            Address::generate(&env), // recovery_key
         )
         .unwrap();
 
         // Verify data integrity before upgrade
         let stored_owners = MultisigSafe::get_owners(env.clone()).unwrap();
         let stored_threshold = MultisigSafe::get_threshold(env.clone()).unwrap();
-        
+
         assert_eq!(stored_owners.len(), owners.len());
         assert_eq!(stored_threshold, threshold);
         assert!(stored_owners.iter().all(|owner| owners.contains(owner)));
 
         // Perform upgrade
         let new_wasm_hash = Bytes::from_array(&env, &[1, 2, 3, 4, 5]);
-        
+
         // All owners need to sign for upgrade
         for owner in &owners {
-            MultisigSafe::upgrade(
-                env.clone(),
-                owner.clone(),
-                new_wasm_hash.clone(),
-            ).unwrap();
+            MultisigSafe::upgrade(env.clone(), owner.clone(), new_wasm_hash.clone()).unwrap();
         }
 
         // Verify data integrity after upgrade
         let post_upgrade_owners = MultisigSafe::get_owners(env.clone()).unwrap();
         let post_upgrade_threshold = MultisigSafe::get_threshold(env.clone()).unwrap();
-        
+
         assert_eq!(post_upgrade_owners, stored_owners);
         assert_eq!(post_upgrade_threshold, stored_threshold);
+    }
+
+    #[test]
+    fn test_heartbeat_functionality() {
+        let env = create_test_env();
+        let owners = create_test_owners(&env);
+        let threshold = 2u32;
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400u64;
+        let recovery_key = Address::generate(&env);
+
+        MultisigSafe::__init__(
+            env.clone(),
+            owners.clone(),
+            threshold,
+            recovery_address.clone(),
+            recovery_delay,
+            recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Get initial time-lock status
+        let (last_active, ledgers_since, is_available, _) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert_eq!(ledgers_since, 0);
+        assert!(!is_available);
+
+        // Call heartbeat
+        MultisigSafe::heartbeat(env.clone(), owners[0].clone()).unwrap();
+
+        // Check that timer was reset
+        let (new_last_active, new_ledgers_since, new_is_available, _) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert_eq!(new_last_active, last_active); // Should be same since no time passed
+        assert_eq!(new_ledgers_since, 0);
+        assert!(!new_is_available);
+    }
+
+    #[test]
+    fn test_time_lock_recovery_before_period() {
+        let env = create_test_env();
+        let owners = create_test_owners(&env);
+        let threshold = 2u32;
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400u64;
+        let recovery_key = Address::generate(&env);
+
+        MultisigSafe::__init__(
+            env.clone(),
+            owners.clone(),
+            threshold,
+            recovery_address.clone(),
+            recovery_delay,
+            recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Try time-lock recovery before period expires (should fail)
+        let new_owners = vec![Address::generate(&env)];
+        let result = MultisigSafe::time_lock_recovery(
+            env.clone(),
+            recovery_key.clone(),
+            new_owners.clone(),
+            1u32,
+            Address::generate(&env),
+            Address::generate(&env),
+        );
+        assert_eq!(result, Err(MultisigError::RecoveryDelayNotPassed));
+    }
+
+    #[test]
+    fn test_time_lock_recovery_after_period() {
+        let env = create_test_env();
+        let owners = create_test_owners(&env);
+        let threshold = 2u32;
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400u64;
+        let recovery_key = Address::generate(&env);
+
+        MultisigSafe::__init__(
+            env.clone(),
+            owners.clone(),
+            threshold,
+            recovery_address.clone(),
+            recovery_delay,
+            recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Simulate time passing beyond TIME_LOCK_PERIOD
+        env.ledger().with_mut(|li| {
+            li.sequence += 15552000 + 1000; // TIME_LOCK_PERIOD + buffer
+        });
+
+        // Now time-lock recovery should work
+        let new_owners = vec![Address::generate(&env)];
+        let new_threshold = 1u32;
+        let new_recovery_address = Address::generate(&env);
+        let new_recovery_key = Address::generate(&env);
+
+        MultisigSafe::time_lock_recovery(
+            env.clone(),
+            recovery_key.clone(),
+            new_owners.clone(),
+            new_threshold,
+            new_recovery_address.clone(),
+            new_recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Verify new state
+        assert_eq!(MultisigSafe::get_owners(env.clone()).unwrap(), new_owners);
+        assert_eq!(
+            MultisigSafe::get_threshold(env.clone()).unwrap(),
+            new_threshold
+        );
+
+        let (addr, _, _) = MultisigSafe::get_recovery_info(env.clone()).unwrap();
+        assert_eq!(addr, new_recovery_address);
+
+        // Verify timer was reset
+        let (last_active, ledgers_since, is_available, recovered_key) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert_eq!(ledgers_since, 0);
+        assert!(!is_available);
+        assert_eq!(recovered_key, new_recovery_key);
+    }
+
+    #[test]
+    fn test_time_lock_recovery_unauthorized() {
+        let env = create_test_env();
+        let owners = create_test_owners(&env);
+        let threshold = 2u32;
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400u64;
+        let recovery_key = Address::generate(&env);
+
+        MultisigSafe::__init__(
+            env.clone(),
+            owners.clone(),
+            threshold,
+            recovery_address.clone(),
+            recovery_delay,
+            recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Simulate time passing beyond TIME_LOCK_PERIOD
+        env.ledger().with_mut(|li| {
+            li.sequence += 15552000 + 1000; // TIME_LOCK_PERIOD + buffer
+        });
+
+        // Try time-lock recovery with wrong caller (should fail)
+        let unauthorized_caller = Address::generate(&env);
+        let new_owners = vec![Address::generate(&env)];
+        let result = MultisigSafe::time_lock_recovery(
+            env.clone(),
+            unauthorized_caller,
+            new_owners.clone(),
+            1u32,
+            Address::generate(&env),
+            Address::generate(&env),
+        );
+        assert_eq!(result, Err(MultisigError::Unauthorized));
+    }
+
+    #[test]
+    fn test_transaction_execution_resets_timer() {
+        let env = create_test_env();
+        let owners = create_test_owners(&env);
+        let threshold = 2u32;
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400u64;
+        let recovery_key = Address::generate(&env);
+
+        MultisigSafe::__init__(
+            env.clone(),
+            owners.clone(),
+            threshold,
+            recovery_address.clone(),
+            recovery_delay,
+            recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Get initial timer state
+        let (initial_last_active, _, _, _) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+
+        // Simulate some time passing
+        env.ledger().with_mut(|li| {
+            li.sequence += 1000;
+        });
+
+        // Submit and execute a transaction
+        let destination = Address::generate(&env);
+        let amount = 1000i128;
+        let data = Bytes::from_array(&env, &[1, 2, 3, 4]);
+        let expires_at = env.ledger().timestamp() + 3600;
+
+        let tx_id =
+            MultisigSafe::submit_transaction(env.clone(), destination, amount, data, expires_at)
+                .unwrap();
+
+        // Sign with second owner to execute
+        MultisigSafe::sign_transaction(env.clone(), tx_id).unwrap();
+
+        // Check that timer was reset after execution
+        let (new_last_active, ledgers_since, _, _) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert!(new_last_active > initial_last_active);
+        assert_eq!(ledgers_since, 0);
+    }
+
+    #[test]
+    fn test_time_lock_status_view() {
+        let env = create_test_env();
+        let owners = create_test_owners(&env);
+        let threshold = 2u32;
+        let recovery_address = Address::generate(&env);
+        let recovery_delay = 86400u64;
+        let recovery_key = Address::generate(&env);
+
+        MultisigSafe::__init__(
+            env.clone(),
+            owners.clone(),
+            threshold,
+            recovery_address.clone(),
+            recovery_delay,
+            recovery_key.clone(),
+        )
+        .unwrap();
+
+        // Test initial status
+        let (last_active, ledgers_since, is_available, rec_key) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert_eq!(ledgers_since, 0);
+        assert!(!is_available);
+        assert_eq!(rec_key, recovery_key);
+
+        // Simulate some time passing
+        env.ledger().with_mut(|li| {
+            li.sequence += 1000;
+        });
+
+        // Check updated status
+        let (last_active2, ledgers_since2, is_available2, _) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert_eq!(last_active2, last_active); // Same initial ledger
+        assert_eq!(ledgers_since2, 1000);
+        assert!(!is_available2); // Still not available since TIME_LOCK_PERIOD is much larger
+
+        // Simulate passing beyond TIME_LOCK_PERIOD
+        env.ledger().with_mut(|li| {
+            li.sequence += 15552000; // TIME_LOCK_PERIOD
+        });
+
+        // Check that recovery is now available
+        let (_, ledgers_since3, is_available3, _) =
+            MultisigSafe::get_time_lock_status(env.clone()).unwrap();
+        assert!(ledgers_since3 >= 15552000);
+        assert!(is_available3);
     }
 }
