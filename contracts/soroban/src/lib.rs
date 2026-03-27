@@ -97,6 +97,32 @@ pub struct FreezeEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignerInfo {
+    pub address: Address,
+    pub weight: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThresholdConfig {
+    pub low: u32,     // Low security (e.g., 2-of-3)
+    pub medium: u32,  // Medium security (e.g., 3-of-5)
+    pub high: u32,    // High security (e.g., 5-of-7)
+    pub current: u32, // Currently active threshold
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigChangeEvent {
+    pub changed_by: Address,
+    pub field: Symbol,
+    pub old_value: Bytes,
+    pub new_value: Bytes,
+    pub changed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnfreezeEvent {
     pub unfrozen_by: Address,
     pub unfrozen_at: u64,
@@ -104,6 +130,8 @@ pub struct UnfreezeEvent {
 }
 
 // Storage keys
+const SIGNERS: Symbol = symbol_short!("SIGNERS");
+const THRESHOLD_CONFIG: Symbol = symbol_short!("THRESH_CFG");
 const OWNERS: Symbol = symbol_short!("OWNERS");
 const THRESHOLD: Symbol = symbol_short!("THRESHLD");
 const TRANSACTION_COUNT: Symbol = symbol_short!("TX_COUNT");
@@ -126,6 +154,7 @@ const LAST_ACTIVE_LEDGER: Symbol = symbol_short!("LAST_ACTIVE");
 const RECOVERY_KEY: Symbol = symbol_short!("RECOVERY_KEY");
 
 // Event topics
+const CONFIG_CHANGE_EVENT: Symbol = symbol_short!("CONFIG_CHANGE");
 const UPGRADE_EVENT: Symbol = symbol_short!("UPGRADE");
 const FREEZE_EVENT: Symbol = symbol_short!("FREEZE");
 const UNFREEZE_EVENT: Symbol = symbol_short!("UNFREEZE");
@@ -149,20 +178,25 @@ pub struct MultisigSafe;
 
 #[contractimpl]
 impl MultisigSafe {
-    /// Initialize the multisig wallet with owners and threshold
+    /// Initialize multisig wallet with signers and threshold configuration
     pub fn __init__(
         env: Env,
-        owners: Vec<Address>,
-        threshold: u32,
+        signers: Vec<Address>,
+        threshold_config: ThresholdConfig,
         recovery_address: Address,
         recovery_delay: u64,
         recovery_path_address: Address,
         recovery_key: Address,
     ) -> Result<(), MultisigError> {
-        if owners.is_empty() {
+        if signers.is_empty() {
             return Err(MultisigError::InvalidThreshold);
         }
 
+        if threshold_config.current == 0 || threshold_config.current > signers.len() as u32 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        if signers.len() as u32 > MAX_OWNERS {
         if threshold == 0 || threshold > owners.len() as u32 {
             return Err(MultisigError::InvalidThreshold);
         }
@@ -175,14 +209,34 @@ impl MultisigSafe {
             return Err(MultisigError::InvalidTimeDelay);
         }
 
-        // Check for duplicate owners
-        let mut unique_owners = std::collections::HashSet::new();
-        for owner in &owners {
-            if !unique_owners.insert(owner) {
+        // Check for duplicate signers
+        let mut unique_signers = std::collections::HashSet::new();
+        for signer in &signers {
+            if !unique_signers.insert(signer) {
                 return Err(MultisigError::OwnerAlreadyExists);
             }
         }
 
+        // Create signer info with default weight of 1 for each signer
+        let signer_infos: Vec<SignerInfo> = signers
+            .iter()
+            .map(|addr| SignerInfo {
+                address: addr.clone(),
+                weight: 1u32, // Default weight
+            })
+            .collect();
+
+        // Store signers and threshold config in persistent storage
+        env.storage().persistent().set(&SIGNERS, &signer_infos);
+        env.storage()
+            .persistent()
+            .set(&THRESHOLD_CONFIG, &threshold_config);
+
+        // Store legacy threshold for backward compatibility
+        env.storage()
+            .instance()
+            .set(&THRESHOLD, &threshold_config.current);
+        env.storage().instance().set(&OWNERS, &signers);
         // Store owners in instance storage with TTL
         env.storage().instance().set(&OWNERS, &owners);
         env.storage().instance().set(&THRESHOLD, &threshold);
@@ -241,6 +295,7 @@ impl MultisigSafe {
         expires_at: u64,
     ) -> Result<u64, MultisigError> {
         caller.require_auth();
+        Self::require_signer(&env, &caller)?;
         Self::require_owner(&env, &caller)?;
 
         // Check if wallet is frozen
@@ -274,7 +329,7 @@ impl MultisigSafe {
             .instance()
             .set(&TRANSACTION_COUNT, &transaction_id);
 
-        // Auto-sign if submitter is an owner
+        // Auto-sign if submitter is a signer
         Self::sign_transaction_internal(&env, transaction_id, caller.clone())?;
 
         Ok(transaction_id)
@@ -287,6 +342,7 @@ impl MultisigSafe {
         transaction_id: u64,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
+        Self::require_signer(&env, &caller)?;
         Self::require_owner(&env, &caller)?;
 
         // Check if wallet is frozen
@@ -333,9 +389,10 @@ impl MultisigSafe {
             .instance()
             .set(&(TRANSACTIONS, transaction_id), &transaction);
 
-        // Auto-execute if threshold reached
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
-        if transaction.signatures >= threshold {
+        // Auto-execute if threshold reached using weighted signatures
+        let signed_weight = Self::calculate_signed_weight(env, transaction_id)?;
+        let current_threshold = Self::get_current_threshold(env)?;
+        if signed_weight >= current_threshold {
             Self::execute_transaction(env.clone(), transaction_id)?;
         }
 
@@ -354,8 +411,9 @@ impl MultisigSafe {
             return Err(MultisigError::TransactionAlreadyExecuted);
         }
 
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
-        if transaction.signatures < threshold {
+        let signed_weight = Self::calculate_signed_weight(env, transaction_id)?;
+        let current_threshold = Self::get_current_threshold(env)?;
+        if signed_weight < current_threshold {
             return Err(MultisigError::InsufficientSignatures);
         }
 
@@ -364,15 +422,28 @@ impl MultisigSafe {
             return Err(MultisigError::TransactionExpired);
         }
 
-        // Execute transaction
+        // Execute transaction based on asset type
         if transaction.amount > 0 {
-            // Transfer logic (assumes contract holds tokens)
-            let token_client = token::Client::new(&env, &transaction.destination);
-            token_client.transfer(
-                &env.current_contract_address(),
-                &transaction.destination,
-                &transaction.amount,
-            );
+            // Determine if this is a native XLM transfer or SAC token transfer
+            // For simplicity, we assume destination is a token address if it's not the contract address
+            if transaction.destination != env.current_contract_address() {
+                // SAC token transfer
+                let token_client = token::Client::new(&env, &transaction.destination);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &transaction.destination,
+                    &transaction.amount,
+                );
+            } else {
+                // Native XLM transfer - use the built-in token contract
+                let native_token_address = env.current_contract_address();
+                let token_client = token::Client::new(&env, &native_token_address);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &transaction.destination,
+                    &transaction.amount,
+                );
+            }
         }
 
         // Mark as executed
@@ -393,27 +464,254 @@ impl MultisigSafe {
         Ok(())
     }
 
-    /// Add a new owner
-    pub fn add_owner(env: Env, caller: Address, new_owner: Address) -> Result<(), MultisigError> {
-        caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+    /// Helper function to check if address is a signer
+    fn require_signer(env: &Env, address: &Address) -> Result<(), MultisigError> {
+        let signers: Vec<SignerInfo> = env
+            .storage()
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
 
-        let mut owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
-
-        if owners.len() as u32 >= MAX_OWNERS {
-            return Err(MultisigError::MaximumOwnersExceeded);
+        if !signers.iter().any(|signer| signer.address == *address) {
+            return Err(MultisigError::Unauthorized);
         }
-
-        if owners.contains(&new_owner) {
-            return Err(MultisigError::OwnerAlreadyExists);
-        }
-
-        owners.push(new_owner.clone());
-        env.storage().instance().set(&OWNERS, &owners);
 
         Ok(())
     }
 
+    /// Helper function to calculate total weight of signed transactions
+    fn calculate_signed_weight(env: &Env, transaction_id: u64) -> Result<u32, MultisigError> {
+        let signers: Vec<SignerInfo> = env
+            .storage()
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
+
+        let mut total_weight = 0u32;
+        for signer in &signers {
+            let signature_key = (SIGNATURES, transaction_id, signer.address.clone());
+            if env.storage().instance().has(&signature_key) {
+                total_weight += signer.weight;
+            }
+        }
+
+        Ok(total_weight)
+    }
+
+    /// Helper function to get current threshold
+    fn get_current_threshold(env: &Env) -> Result<u32, MultisigError> {
+        let threshold_config: ThresholdConfig = env
+            .storage()
+            .persistent()
+            .get(&THRESHOLD_CONFIG)
+            .ok_or(MultisigError::EntryArchived)?;
+        Ok(threshold_config.current)
+    }
+
+    /// Change threshold level (Low, Medium, High)
+    pub fn change_threshold_level(
+        env: Env,
+        caller: Address,
+        new_level: Symbol, // "low", "medium", or "high"
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_signer(&env, &caller)?;
+
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let mut threshold_config: ThresholdConfig = env
+            .storage()
+            .persistent()
+            .get(&THRESHOLD_CONFIG)
+            .ok_or(MultisigError::EntryArchived)?;
+
+        let old_threshold = threshold_config.current;
+        let old_value = Bytes::from_slice(&env, &old_threshold.to_le_bytes());
+
+        // Update threshold based on level
+        match new_level {
+            level if level == symbol_short!("low") => {
+                threshold_config.current = threshold_config.low;
+            }
+            level if level == symbol_short!("medium") => {
+                threshold_config.current = threshold_config.medium;
+            }
+            level if level == symbol_short!("high") => {
+                threshold_config.current = threshold_config.high;
+            }
+            _ => return Err(MultisigError::InvalidThreshold),
+        }
+
+        // Validate new threshold
+        let signers: Vec<SignerInfo> = env
+            .storage()
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
+        if threshold_config.current == 0 || threshold_config.current > signers.len() as u32 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        // Store updated config
+        env.storage()
+            .persistent()
+            .set(&THRESHOLD_CONFIG, &threshold_config);
+        env.storage()
+            .instance()
+            .set(&THRESHOLD, &threshold_config.current);
+
+        // Emit configuration change event
+        let new_value = Bytes::from_slice(&env, &threshold_config.current.to_le_bytes());
+        let config_event = ConfigChangeEvent {
+            changed_by: caller.clone(),
+            field: symbol_short!("THRESHOLD"),
+            old_value,
+            new_value,
+            changed_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (CONFIG_CHANGE_EVENT, symbol_short!("THRESHOLD_CHANGED")),
+            config_event,
+        );
+
+        Ok(())
+    }
+
+    /// Update signer weight
+    pub fn update_signer_weight(
+        env: Env,
+        caller: Address,
+        signer_address: Address,
+        new_weight: u32,
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_signer(&env, &caller)?;
+
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let mut signers: Vec<SignerInfo> = env
+            .storage()
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
+
+        // Find and update the signer
+        let signer_index = signers
+            .iter()
+            .position(|signer| signer.address == signer_address)
+            .ok_or(MultisigError::OwnerDoesNotExist)?;
+
+        let old_weight = signers[signer_index].weight;
+        signers[signer_index].weight = new_weight;
+
+        // Validate new weight
+        if new_weight == 0 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        // Store updated signers
+        env.storage().persistent().set(&SIGNERS, &signers);
+
+        // Emit configuration change event
+        let old_value = Bytes::from_slice(&env, &old_weight.to_le_bytes());
+        let new_value = Bytes::from_slice(&env, &new_weight.to_le_bytes());
+        let config_event = ConfigChangeEvent {
+            changed_by: caller.clone(),
+            field: symbol_short!("WEIGHT"),
+            old_value,
+            new_value,
+            changed_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (CONFIG_CHANGE_EVENT, symbol_short!("WEIGHT_CHANGED")),
+            config_event,
+        );
+
+        Ok(())
+    }
+        let mut owners: Vec<Address> = env.storage().instance().get(&OWNERS).unwrap_or_default();
+
+    /// Add a new signer
+    pub fn add_signer(
+        env: Env,
+        caller: Address,
+        new_signer: Address,
+        weight: u32,
+    ) -> Result<(), MultisigError> {
+        caller.require_auth();
+        Self::require_signer(&env, &caller)?;
+
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let mut signers: Vec<SignerInfo> = env
+            .storage()
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
+
+        if signers.len() as u32 >= MAX_OWNERS {
+            return Err(MultisigError::MaximumOwnersExceeded);
+        }
+
+        if weight == 0 {
+            return Err(MultisigError::InvalidThreshold);
+        }
+
+        if signers.iter().any(|signer| signer.address == new_signer) {
+            return Err(MultisigError::OwnerAlreadyExists);
+        }
+
+        signers.push(SignerInfo {
+            address: new_signer.clone(),
+            weight,
+        });
+
+        env.storage().persistent().set(&SIGNERS, &signers);
+
+        // Update legacy owners list for backward compatibility
+        let owners: Vec<Address> = signers
+            .iter()
+            .map(|signer| signer.address.clone())
+            .collect();
+        env.storage().instance().set(&OWNERS, &owners);
+
+        // Emit configuration change event
+        let new_value = Bytes::from_slice(&env, &weight.to_le_bytes());
+        let config_event = ConfigChangeEvent {
+            changed_by: caller.clone(),
+            field: symbol_short!("SIGNER_ADDED"),
+            new_value,
+            old_value: Bytes::new(&env),
+            changed_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (CONFIG_CHANGE_EVENT, symbol_short!("SIGNER_ADDED")),
+            config_event,
+        );
+
+        Ok(())
+    }
+
+    /// Remove a signer with deadlock protection
+    pub fn remove_signer(
+        env: Env,
+        caller: Address,
+        signer_to_remove: Address,
     /// Remove an owner
     pub fn remove_owner(
         env: Env,
@@ -421,34 +719,80 @@ impl MultisigSafe {
         owner_to_remove: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
-        let mut owners: Vec<Address> = env
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let mut signers: Vec<SignerInfo> = env
             .storage()
-            .instance()
-            .get(&OWNERS)
-            .ok_or(MultisigError::OwnerDoesNotExist)?;
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
 
-        if owners.len() <= 1 {
+        // Deadlock protection: prevent removing the last signer
+        if signers.len() <= 1 {
             return Err(MultisigError::CannotRemoveLastOwner);
         }
 
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD).unwrap();
-        if owners.len() as u32 - 1 < threshold {
+        // Check if removing would break threshold
+        let current_threshold = Self::get_current_threshold(&env)?;
+        let signer_to_remove_weight = signers
+            .iter()
+            .find(|signer| signer.address == signer_to_remove)
+            .map(|signer| signer.weight)
+            .ok_or(MultisigError::OwnerDoesNotExist)?;
+
+        let total_weight_without_signer: u32 = signers
+            .iter()
+            .filter(|signer| signer.address != signer_to_remove)
+            .map(|signer| signer.weight)
+            .sum();
+
+        if total_weight_without_signer < current_threshold {
             return Err(MultisigError::InvalidThreshold);
         }
 
-        let index = owners
+        // Remove signer
+        let index = signers
             .iter()
-            .position(|owner| *owner == owner_to_remove)
+            .position(|signer| signer.address == signer_to_remove)
             .ok_or(MultisigError::OwnerDoesNotExist)?;
 
-        owners.remove(index);
+        let removed_weight = signers[index].weight;
+        signers.remove(index);
+
+        env.storage().persistent().set(&SIGNERS, &signers);
+
+        // Update legacy owners list for backward compatibility
+        let owners: Vec<Address> = signers
+            .iter()
+            .map(|signer| signer.address.clone())
+            .collect();
         env.storage().instance().set(&OWNERS, &owners);
+
+        // Emit configuration change event
+        let old_value = Bytes::from_slice(&env, &removed_weight.to_le_bytes());
+        let config_event = ConfigChangeEvent {
+            changed_by: caller.clone(),
+            field: symbol_short!("SIGNER_REMOVED"),
+            old_value,
+            new_value: Bytes::new(&env),
+            changed_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (CONFIG_CHANGE_EVENT, symbol_short!("SIGNER_REMOVED")),
+            config_event,
+        );
 
         Ok(())
     }
 
+    /// Change the signature threshold (legacy function for backward compatibility)
     /// Change the signature threshold
     pub fn change_threshold(
         env: Env,
@@ -456,19 +800,54 @@ impl MultisigSafe {
         new_threshold: u32,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
-        let owners: Vec<Address> = env
+        // Check if wallet is frozen
+        Self::check_frozen_status(&env)?;
+
+        // Auto-extend instance TTL
+        Self::auto_extend_instance_ttl(&env)?;
+
+        let mut threshold_config: ThresholdConfig = env
             .storage()
-            .instance()
-            .get(&OWNERS)
-            .ok_or(MultisigError::OwnerDoesNotExist)?;
+            .persistent()
+            .get(&THRESHOLD_CONFIG)
+            .ok_or(MultisigError::EntryArchived)?;
 
-        if new_threshold == 0 || new_threshold > owners.len() as u32 {
+        let old_threshold = threshold_config.current;
+        let old_value = Bytes::from_slice(&env, &old_threshold.to_le_bytes());
+
+        // Validate new threshold
+        let signers: Vec<SignerInfo> = env
+            .storage()
+            .persistent()
+            .get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
+        if new_threshold == 0 || new_threshold > signers.len() as u32 {
             return Err(MultisigError::InvalidThreshold);
         }
 
+        // Update threshold config
+        threshold_config.current = new_threshold;
+        env.storage()
+            .persistent()
+            .set(&THRESHOLD_CONFIG, &threshold_config);
         env.storage().instance().set(&THRESHOLD, &new_threshold);
+
+        // Emit configuration change event
+        let new_value = Bytes::from_slice(&env, &new_threshold.to_le_bytes());
+        let config_event = ConfigChangeEvent {
+            changed_by: caller.clone(),
+            field: symbol_short!("THRESHOLD"),
+            old_value,
+            new_value,
+            changed_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (CONFIG_CHANGE_EVENT, symbol_short!("THRESHOLD_CHANGED")),
+            config_event,
+        );
 
         Ok(())
     }
@@ -480,7 +859,7 @@ impl MultisigSafe {
         new_recovery_address: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
         // Check if recovery is already in progress
         if env.storage().instance().has(&RECOVERY_REQUEST) {
@@ -530,7 +909,7 @@ impl MultisigSafe {
     /// Cancel ongoing recovery
     pub fn cancel_recovery(env: Env, caller: Address) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
         if !env.storage().instance().has(&RECOVERY_REQUEST) {
             return Err(MultisigError::RecoveryNotInitiated);
@@ -818,7 +1197,7 @@ impl MultisigSafe {
         reason: Bytes,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
         // Validate freeze duration
         if duration_seconds < MIN_FREEZE_DURATION || duration_seconds > MAX_FREEZE_DURATION {
@@ -906,7 +1285,7 @@ impl MultisigSafe {
     /// Unfreeze the wallet with high threshold (all owners)
     pub fn unfreeze_wallet(env: Env, caller: Address, reason: Bytes) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
         let current_time = env.ledger().timestamp();
         let is_frozen: bool = env.storage().instance().get(&IS_FROZEN).unwrap_or(false);
@@ -1066,6 +1445,27 @@ impl MultisigSafe {
         Ok(env.storage().instance().has(&freeze_key))
     }
 
+    pub fn has_signed_unfreeze(
+        env: Env,
+        unfreeze_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
+        let unfreeze_key = (UNFREEZE_EVENT, unfreeze_tx_id, owner);
+        Ok(env.storage().instance().has(&unfreeze_key))
+    }
+
+    pub fn has_signed_upgrade(
+        env: Env,
+        upgrade_tx_id: u64,
+        owner: Address,
+    ) -> Result<bool, MultisigError> {
+        let upgrade_key = (UPGRADE_EVENT, upgrade_tx_id, owner);
+        Ok(env.storage().instance().has(&upgrade_key))
+    }
+        let freeze_key = (FREEZE_EVENT, freeze_tx_id, owner);
+        Ok(env.storage().instance().has(&freeze_key))
+    }
+
     /// Helper function to check if an owner has signed a specific unfreeze request
     pub fn has_signed_unfreeze(
         env: Env,
@@ -1080,7 +1480,7 @@ impl MultisigSafe {
     /// Requires the "High" threshold of signers (all owners)
     pub fn upgrade(env: Env, caller: Address, new_wasm_hash: Bytes) -> Result<(), MultisigError> {
         caller.require_auth();
-        Self::require_owner(&env, &caller)?;
+        Self::require_signer(&env, &caller)?;
 
         // Check if upgrade is already in progress
         if env.storage().instance().has(&UPGRADE_STATE) {
@@ -1259,9 +1659,15 @@ impl MultisigSafe {
 
     pub fn get_recovery_info(
         env: Env,
-    ) -> Result<(Address, u64, Option<RecoveryRequest>), MultisigError> {
+        upgrade_tx_id: u64,
+        owner: Address,
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
+
+        let signers: Vec<SignerInfo> = env.storage().persistent().get(&SIGNERS)
+            .ok_or(MultisigError::EntryArchived)?;
+        
+        Ok(signers.iter().any(|signer| signer.address == address))
 
         let recovery_address: Address = env
             .storage()
@@ -1409,7 +1815,6 @@ impl MultisigSafe {
     pub fn get_rent_balance(env: Env) -> Result<i128, MultisigError> {
         Ok(env.storage().instance().get(&RENT_BALANCE).unwrap_or(0))
     }
-
     /// Get TTL information
     pub fn get_ttl_info(env: Env) -> Result<(u32, u32, i128), MultisigError> {
         let last_extension: u32 = env
@@ -1461,6 +1866,7 @@ impl MultisigSafe {
         value: Bytes,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
+        Self::require_signer(&env, &caller)?;
         Self::require_owner(&env, &caller)?;
 
         // Check minimum balance requirements
