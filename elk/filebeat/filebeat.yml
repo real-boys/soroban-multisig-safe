@@ -1,0 +1,32 @@
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/app/*.log
+    json.keys_under_root: true
+    json.add_error_key: true
+    json.message_key: message
+    fields:
+      service: stellar-multisig-safe
+      environment: ${ENVIRONMENT:production}
+
+  - type: docker
+    enabled: true
+    containers.path: /var/lib/docker/containers
+    containers.stream: stdout
+
+processors:
+  - add_host_metadata: ~
+  - add_docker_metadata: ~
+  - add_cloud_metadata: ~
+
+output.logstash:
+  hosts: ["logstash:5000"]
+
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat.log
+  keepfiles: 7
+  permissions: 0644
