@@ -1,7 +1,7 @@
 import Bull, { Queue, Job, JobOptions } from 'bull';
 import { logger } from '@/utils/logger';
 
-export type QueueName = 'transactions' | 'notifications' | 'events';
+export type QueueName = 'transactions' | 'notifications' | 'events' | 'tasks' | 'tasks-high-priority' | 'tasks-low-priority' | 'dead-letter-tasks';
 
 export interface MessageJob<T = unknown> {
   type: string;
@@ -25,15 +25,15 @@ export class MessageQueueService {
   private getQueue(name: string): Queue {
     if (!this.queues.has(name)) {
       const queue = new Bull(name, REDIS_URL);
-      queue.on('failed', (job, err) => {
+      queue.on('failed', (job: Job, err: Error) => {
         logger.error(`Job ${job.id} in queue "${name}" failed: ${err.message}`);
         if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
-          this.sendToDeadLetter(name, job).catch((e) =>
+          this.sendToDeadLetter(name, job).catch((e: Error) =>
             logger.error('Dead letter enqueue error:', e)
           );
         }
       });
-      queue.on('completed', (job) =>
+      queue.on('completed', (job: Job) =>
         logger.info(`Job ${job.id} in queue "${name}" completed`)
       );
       this.queues.set(name, queue);

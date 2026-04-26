@@ -23,6 +23,7 @@ import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
 import tokenRoutes from '@/routes/token';
 import eventIndexerRoutes from '@/routes/eventIndexer';
+import taskRoutes from '@/routes/tasks';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
@@ -33,6 +34,13 @@ import { IndexerHealthChecker } from '@/services/IndexerHealthChecker';
 import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
+
+// Task Management Services
+import { taskSchedulerService } from '@/services/TaskSchedulerService';
+import { distributedExecutionService } from '@/services/DistributedExecutionService';
+import { taskFailureHandlerService } from '@/services/TaskFailureHandlerService';
+import { taskMonitoringService } from '@/services/TaskMonitoringService';
+import { taskHandlerIntegration } from '@/services/TaskHandlerIntegration';
 
 dotenv.config();
 
@@ -71,6 +79,7 @@ app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/token', tokenRoutes);
 app.use('/api/events', eventIndexerRoutes);
+app.use('/api/tasks', taskRoutes);
 
 // Socket.io setup
 setupSocketHandlers(io);
@@ -120,6 +129,7 @@ const resourceMonitor = new ResourceMonitor(Number(process.env.RESOURCE_CHECK_IN
 resourceMonitor.start();
 logger.info('Resource Monitor initialized');
 
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -143,6 +153,17 @@ async function startServer() {
     // Connect to Redis
     await connectRedis();
     logger.info('Redis connected successfully');
+
+    // Initialize Task Management Services
+    logger.info('Initializing Task Management Services...');
+    await distributedExecutionService.start();
+    await taskSchedulerService.start();
+    await taskMonitoringService.start();
+    taskFailureHandlerService.startDeadLetterProcessor();
+    
+    // Migrate existing cron jobs and register handlers
+    await taskHandlerIntegration.migrateExistingCronJobs();
+    logger.info('Task Management Services initialized');
 
     // Start server
     server.listen(PORT, () => {
