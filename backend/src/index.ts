@@ -23,6 +23,7 @@ import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
 import tokenRoutes from '@/routes/token';
 import eventIndexerRoutes from '@/routes/eventIndexer';
+import bulkOperationsRoutes from '@/routes/bulkOperations';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
@@ -33,6 +34,7 @@ import { IndexerHealthChecker } from '@/services/IndexerHealthChecker';
 import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
+import { WebSocketService } from '@/services/WebSocketService';
 
 dotenv.config();
 
@@ -71,6 +73,10 @@ app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/token', tokenRoutes);
 app.use('/api/events', eventIndexerRoutes);
+app.use('/api/bulk', bulkOperationsRoutes);
+
+// Initialize WebSocket service for bulk operations
+const webSocketService = new WebSocketService(server);
 
 // Socket.io setup
 setupSocketHandlers(io);

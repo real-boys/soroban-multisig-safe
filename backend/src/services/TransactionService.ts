@@ -1,6 +1,13 @@
 import { PrismaClient, Transaction, Comment } from '@prisma/client';
 import { CreateTransactionRequest } from '@/types/transaction';
 import { StellarService } from '@/services/StellarService';
+import {
+  BulkCreateTransactionRequest,
+  BulkUpdateTransactionRequest,
+  BulkDeleteTransactionRequest,
+  BulkOperationContext,
+  BulkOperationError
+} from '@/types/bulk';
 
 export class TransactionService {
   private prisma: PrismaClient;
@@ -227,5 +234,251 @@ export class TransactionService {
       console.error('Error verifying signer status:', error);
       return false;
     }
+  }
+
+  /**
+   * Bulk create transactions
+   */
+  async bulkCreateTransactions(
+    requests: BulkCreateTransactionRequest[],
+    context: BulkOperationContext
+  ): Promise<Transaction[]> {
+    const createdTransactions: Transaction[] = [];
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        // Verify user is signer for the wallet
+        const isSigner = await this.isUserSignerForWallet(request.walletId, context.userId);
+        if (!isSigner) {
+          throw new Error(`User is not authorized to create transactions for wallet: ${request.walletId}`);
+        }
+
+        // Generate transaction ID (in real implementation, this would come from Stellar)
+        const transactionId = BigInt(Date.now() + i);
+
+        const transaction = await this.createTransaction(request.walletId, {
+          ...request,
+          transactionId,
+          expiresAt: new Date(request.expiresAt),
+        });
+
+        createdTransactions.push(transaction);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'TRANSACTION_CREATE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All transaction creation operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+
+    return createdTransactions;
+  }
+
+  /**
+   * Bulk update transactions
+   */
+  async bulkUpdateTransactions(
+    requests: BulkUpdateTransactionRequest[],
+    context: BulkOperationContext
+  ): Promise<Transaction[]> {
+    const updatedTransactions: Transaction[] = [];
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        // Verify user is signer for the transaction
+        const isSigner = await this.isUserSigner(request.id, context.userId);
+        if (!isSigner) {
+          throw new Error(`User is not authorized to update transaction: ${request.id}`);
+        }
+
+        const transaction = await this.updateTransactionMetadata(request.id, {
+          title: request.title,
+          description: request.description,
+        });
+
+        if (!transaction) {
+          throw new Error(`Transaction not found: ${request.id}`);
+        }
+
+        updatedTransactions.push(transaction);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'TRANSACTION_UPDATE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All transaction update operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+
+    return updatedTransactions;
+  }
+
+  /**
+   * Bulk delete transactions (soft delete)
+   */
+  async bulkDeleteTransactions(
+    requests: BulkDeleteTransactionRequest[],
+    context: BulkOperationContext
+  ): Promise<void> {
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        // Verify user is signer for the transaction
+        const isSigner = await this.isUserSigner(request.id, context.userId);
+        if (!isSigner) {
+          throw new Error(`User is not authorized to delete transaction: ${request.id}`);
+        }
+
+        await this.softDeleteTransaction(request.id);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'TRANSACTION_DELETE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All transaction delete operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+  }
+
+  /**
+   * Verify if a user is a signer for a wallet
+   */
+  private async isUserSignerForWallet(walletId: string, userId: string): Promise<boolean> {
+    try {
+      const wallet = await this.prisma.wallet.findUnique({
+        where: { id: walletId },
+        include: {
+          owners: true,
+        },
+      });
+
+      if (!wallet) return false;
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+      });
+
+      if (!user) return false;
+
+      return wallet.owners.some(owner => owner.address === user.stellarAddress);
+    } catch (error) {
+      console.error('Error verifying wallet signer status:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Validate bulk transaction creation requests
+   */
+  validateBulkCreateRequests(requests: BulkCreateTransactionRequest[]): string[] {
+    const errors: string[] = [];
+
+    requests.forEach((request, index) => {
+      const itemErrors: string[] = [];
+
+      if (!request.walletId || request.walletId.trim().length === 0) {
+        itemErrors.push('Wallet ID is required');
+      }
+
+      if (!request.destination || request.destination.trim().length === 0) {
+        itemErrors.push('Destination address is required');
+      }
+
+      if (!request.amount || request.amount.trim().length === 0) {
+        itemErrors.push('Amount is required');
+      }
+
+      if (request.amount && isNaN(Number(request.amount)) || Number(request.amount) <= 0) {
+        itemErrors.push('Amount must be a positive number');
+      }
+
+      if (!request.title || request.title.trim().length === 0) {
+        itemErrors.push('Title is required');
+      }
+
+      if (!request.description || request.description.trim().length === 0) {
+        itemErrors.push('Description is required');
+      }
+
+      if (!request.expiresAt || new Date(request.expiresAt) <= new Date()) {
+        itemErrors.push('Expiry date must be in the future');
+      }
+
+      if (itemErrors.length > 0) {
+        errors.push(`Item ${index}: ${itemErrors.join(', ')}`);
+      }
+    });
+
+    return errors;
+  }
+
+  /**
+   * Validate bulk transaction update requests
+   */
+  validateBulkUpdateRequests(requests: BulkUpdateTransactionRequest[]): string[] {
+    const errors: string[] = [];
+
+    requests.forEach((request, index) => {
+      const itemErrors: string[] = [];
+
+      if (!request.id || request.id.trim().length === 0) {
+        itemErrors.push('Transaction ID is required');
+      }
+
+      if (!request.title && !request.description) {
+        itemErrors.push('At least title or description must be provided');
+      }
+
+      if (request.title && request.title.trim().length === 0) {
+        itemErrors.push('Title cannot be empty');
+      }
+
+      if (request.description && request.description.trim().length === 0) {
+        itemErrors.push('Description cannot be empty');
+      }
+
+      if (itemErrors.length > 0) {
+        errors.push(`Item ${index}: ${itemErrors.join(', ')}`);
+      }
+    });
+
+    return errors;
   }
 }
