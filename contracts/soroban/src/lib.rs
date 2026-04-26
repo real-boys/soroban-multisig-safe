@@ -1,9 +1,9 @@
 #![no_std]
 
-pub mod vesting;
-pub mod payment_splitter;
-pub mod liquidity_pool;
-pub mod bridge;
+pub mod escrow;
+pub mod staking;
+pub mod oracle;
+pub mod nft_marketplace;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, env, panic, symbol_short, token, Address,
