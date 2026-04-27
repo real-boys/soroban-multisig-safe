@@ -28,6 +28,11 @@ import eventIndexerRoutes from '@/routes/eventIndexer';
 import { setupSocketHandlers } from '@/services/socketService';
 import { CronService } from '@/services/CronService';
 import { EventIndexerService } from '@/services/EventIndexerService';
+import { RPCLoadBalancer } from '@/services/RPCLoadBalancer';
+import { IndexerHealthChecker } from '@/services/IndexerHealthChecker';
+import { SyncLagAlertService } from '@/services/SyncLagAlertService';
+import { DatabaseBackupService } from '@/services/DatabaseBackupService';
+import { ResourceMonitor } from '@/services/ResourceMonitor';
 
 dotenv.config();
 
@@ -77,6 +82,44 @@ cronService.start();
 const eventIndexerService = new EventIndexerService();
 eventIndexerService.start();
 
+// Initialize RPC Load Balancer with multiple providers
+const rpcProviders = (process.env.STELLAR_RPC_URLS || process.env.STELLAR_RPC_URL || '').split(',').filter(Boolean);
+const rpcLoadBalancer = new RPCLoadBalancer(rpcProviders);
+rpcLoadBalancer.start();
+logger.info(`RPC Load Balancer initialized with ${rpcProviders.length} provider(s)`);
+
+// Initialize Indexer Health Checker
+const indexerHealthChecker = new IndexerHealthChecker();
+indexerHealthChecker.start();
+logger.info('Indexer Health Checker initialized');
+
+// Initialize Sync Lag Alert Service
+const syncLagAlertService = new SyncLagAlertService({
+  syncLagWarning: Number(process.env.SYNC_LAG_WARNING) || 100,
+  syncLagCritical: Number(process.env.SYNC_LAG_CRITICAL) || 500,
+  checkInterval: Number(process.env.SYNC_LAG_CHECK_INTERVAL) || 60000,
+  notificationChannels: (process.env.ALERT_CHANNELS || 'webhook').split(','),
+});
+syncLagAlertService.start();
+logger.info('Sync Lag Alert Service initialized');
+
+// Initialize Database Backup Service
+const databaseBackupService = new DatabaseBackupService({
+  backupDir: process.env.BACKUP_DIR,
+  walArchiveDir: process.env.WAL_ARCHIVE_DIR,
+  retentionDays: Number(process.env.BACKUP_RETENTION_DAYS) || 7,
+  webhookUrl: process.env.BACKUP_WEBHOOK_URL,
+});
+// Start automated backups every 6 hours
+const backupIntervalMinutes = Number(process.env.BACKUP_INTERVAL_MINUTES) || 360;
+databaseBackupService.start(backupIntervalMinutes);
+logger.info(`Database Backup Service initialized (interval: ${backupIntervalMinutes} minutes)`);
+
+// Initialize Resource Monitor
+const resourceMonitor = new ResourceMonitor(Number(process.env.RESOURCE_CHECK_INTERVAL) || 60000);
+resourceMonitor.start();
+logger.info('Resource Monitor initialized');
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -113,21 +156,44 @@ async function startServer() {
 }
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    logger.info('Process terminated');
+async function gracefulShutdown(signal: string) {
+  logger.info(`${signal} received, shutting down gracefully...`);
+  
+  // Stop all services
+  logger.info('Stopping services...');
+  eventIndexerService.stop();
+  rpcLoadBalancer.stop();
+  indexerHealthChecker.stop();
+  syncLagAlertService.stop();
+  databaseBackupService.stop();
+  resourceMonitor.stop();
+  cronService.stop();
+  
+  // Close server
+  server.close(async () => {
+    logger.info('HTTP server closed');
+    
+    // Disconnect from database
+    try {
+      await prisma.$disconnect();
+      logger.info('Database disconnected');
+    } catch (error) {
+      logger.error('Error disconnecting database:', error);
+    }
+    
+    logger.info('Graceful shutdown complete');
     process.exit(0);
   });
-});
+  
+  // Force exit after timeout
+  setTimeout(() => {
+    logger.error('Forced shutdown due to timeout');
+    process.exit(1);
+  }, 30000);
+}
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    logger.info('Process terminated');
-    process.exit(0);
-  });
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
