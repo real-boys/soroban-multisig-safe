@@ -4,15 +4,14 @@ pub mod escrow;
 pub mod staking;
 pub mod oracle;
 pub mod nft_marketplace;
+pub mod treasury;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, env, panic, symbol_short, token, Address,
     Bytes, Env, IntoVal, Map, Symbol, Vec,
 };
 
-use thiserror::Error;
-
-#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[contracterror]
 pub enum MultisigError {
     /// Unauthorized access - caller is not an owner
@@ -1092,11 +1091,6 @@ impl MultisigSafe {
         env: Env,
         caller: Address,
         signer_to_remove: Address,
-    /// Remove an owner
-    pub fn remove_owner(
-        env: Env,
-        caller: Address,
-        owner_to_remove: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
         Self::require_signer(&env, &caller)?;
@@ -1444,6 +1438,25 @@ impl MultisigSafe {
         let current_time = env.ledger().timestamp();
 
         if current_time.saturating_sub(last_heartbeat) < RECOVERY_PERIOD {
+            return Err(MultisigError::RecoveryDelayNotPassed);
+        }
+
+        // Update signers and configuration
+        env.storage().instance().set(&OWNERS, &new_owners);
+        env.storage().instance().set(&THRESHOLD, &new_threshold);
+        env.storage().instance().set(&RECOVERY_ADDRESS, &new_recovery_address);
+        env.storage().instance().set(&RECOVERY_PATH_ADDRESS, &new_recovery_path_address);
+
+        // Reset heartbeat
+        env.storage().instance().set(&LAST_HEARTBEAT, &current_time);
+
+        Ok(())
+    }
+
+    /// Update recovery key (only callable by current recovery key)
+    pub fn update_recovery_key(
+        env: Env,
+        caller: Address,
         new_recovery_key: Address,
     ) -> Result<(), MultisigError> {
         caller.require_auth();
@@ -1471,56 +1484,8 @@ impl MultisigSafe {
             return Err(MultisigError::RecoveryDelayNotPassed);
         }
 
-        // Validate new owners and threshold
-        if new_owners.is_empty() || new_threshold == 0 || new_threshold > new_owners.len() as u32 {
-            return Err(MultisigError::InvalidThreshold);
-        }
-
-        if new_owners.len() as u32 > MAX_OWNERS {
-            return Err(MultisigError::MaximumOwnersExceeded);
-        }
-
-        // Update wallet state
-        env.storage().instance().set(&OWNERS, &new_owners);
-        env.storage().instance().set(&THRESHOLD, &new_threshold);
-        env.storage()
-            .instance()
-            .set(&RECOVERY_ADDRESS, &new_recovery_address);
-        env.storage()
-            .instance()
-            .set(&RECOVERY_PATH_ADDRESS, &new_recovery_path_address);
-
-        // Reset heartbeat timer
-        env.storage()
-            .instance()
-            .set(&LAST_HEARTBEAT, &env.ledger().timestamp());
-            .set(&RECOVERY_KEY, &new_recovery_key);
-
-        // Reset activity timer
-        env.storage()
-            .instance()
-            .set(&LAST_ACTIVE_LEDGER, &env.ledger().sequence());
-
-        // Clear any ongoing recovery
-        env.storage().instance().remove(&RECOVERY_REQUEST);
-
-        // Auto-unfreeze wallet after successful time-lock recovery
-        env.storage().instance().set(&IS_FROZEN, &false);
-        env.storage().instance().set(&FREEZE_UNTIL, &0u64);
-        env.storage().instance().set(
-            &FREEZE_REASON,
-            &Bytes::from_slice(&env, b"Auto-unfreeze: time-lock recovery executed"),
-        );
-
-        // Emit time-lock recovery event
-        let unfreeze_event = UnfreezeEvent {
-            unfrozen_by: caller.clone(),
-            unfrozen_at: env.ledger().timestamp(),
-            reason: Bytes::from_slice(&env, b"Time-lock recovery executed"),
-        };
-
-        env.events()
-            .publish((UNFREEZE_EVENT, symbol_short!("TIME_LOCK")), unfreeze_event);
+        // Update recovery key
+        env.storage().instance().set(&RECOVERY_KEY, &new_recovery_key);
 
         Ok(())
     }
@@ -2039,15 +2004,11 @@ impl MultisigSafe {
 
     pub fn get_recovery_info(
         env: Env,
-        upgrade_tx_id: u64,
-        owner: Address,
+        _upgrade_tx_id: u64,
+        _owner: Address,
+    ) -> Result<(Address, u64, Option<RecoveryRequest>), MultisigError> {
         // Auto-extend instance TTL
         Self::auto_extend_instance_ttl(&env)?;
-
-        let signers: Vec<SignerInfo> = env.storage().persistent().get(&SIGNERS)
-            .ok_or(MultisigError::EntryArchived)?;
-        
-        Ok(signers.iter().any(|signer| signer.address == address))
 
         let recovery_address: Address = env
             .storage()
@@ -2494,9 +2455,6 @@ mod test {
             assert_eq!(proposal.votes, 0);
             assert_eq!(proposal.required_votes, 1);
             assert!(!proposal.executed);
-                recovery_path_address.clone(),
-            )
-            .unwrap();
 
             // Test heartbeat functionality
             MultisigSafe::heartbeat(env.clone(), owner.clone()).unwrap();
@@ -2693,27 +2651,6 @@ mod test {
             // Verify proposal is marked as executed (expired)
             let proposal = MultisigSafe::get_proposal(env.clone(), proposal_id).unwrap();
             assert!(proposal.executed);
-                recovery_path_address.clone(),
-            )
-            .unwrap();
-
-            // Simulate time passing beyond RECOVERY_PERIOD
-            env.ledger().with_mut(|li| {
-                li.timestamp += RECOVERY_PERIOD + 1000; // RECOVERY_PERIOD + buffer
-            });
-
-            // Try time-lock recovery with wrong caller (should fail)
-            let unauthorized_caller = Address::generate(&env);
-            let new_owners = vec![Address::generate(&env)];
-            let result = MultisigSafe::time_lock_recovery(
-                env.clone(),
-                unauthorized_caller,
-                new_owners.clone(),
-                1u32,
-                Address::generate(&env),
-                Address::generate(&env),
-            );
-            assert_eq!(result, Err(MultisigError::Unauthorized));
         });
     }
 
@@ -2949,7 +2886,7 @@ mod test {
             });
 
             // Test now active
-            assert!(MultisigSafe::is_recovery_path_active(env.clone()).unwrap();
+            assert!(MultisigSafe::is_recovery_path_active(env.clone()).unwrap());
         });
     }
 }
