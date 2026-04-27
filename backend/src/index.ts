@@ -11,7 +11,7 @@ import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
 import { rateLimiter } from '@/middleware/rateLimiter';
 import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
-import { connectDatabase } from '@/config/database';
+import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
 // Versioned routes
@@ -27,6 +27,7 @@ import { IndexerHealthChecker } from '@/services/IndexerHealthChecker';
 import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
+import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
 
 dotenv.config();
 
@@ -129,6 +130,10 @@ const resourceMonitor = new ResourceMonitor(Number(process.env.RESOURCE_CHECK_IN
 resourceMonitor.start();
 logger.info('Resource Monitor initialized');
 
+// Initialize Dead Letter Queue Service
+deadLetterQueueService.start();
+logger.info('Dead Letter Queue Service initialized');
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -177,6 +182,7 @@ async function gracefulShutdown(signal: string) {
   databaseBackupService.stop();
   resourceMonitor.stop();
   cronService.stop();
+  deadLetterQueueService.stop();
   
   // Close server
   server.close(async () => {
