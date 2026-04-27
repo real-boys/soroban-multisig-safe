@@ -10,19 +10,13 @@ import { Server } from 'socket.io';
 import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
 import { rateLimiter } from '@/middleware/rateLimiter';
+import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
 import { connectDatabase } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
-// Routes
-import authRoutes from '@/routes/auth';
-import walletRoutes from '@/routes/wallet';
-import transactionRoutes from '@/routes/transaction';
-import userRoutes from '@/routes/user';
-import recoveryRoutes from '@/routes/recovery';
-import analyticsRoutes from '@/routes/analytics';
-import healthRoutes from '@/routes/health';
-import tokenRoutes from '@/routes/token';
-import eventIndexerRoutes from '@/routes/eventIndexer';
+// Versioned routes
+import v1Routes from '@/routes/v1';
+import v2Routes from '@/routes/v2';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
@@ -59,18 +53,33 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(rateLimiter);
 
-// Health check endpoint
-app.use('/api/health', healthRoutes);
+// Apply API versioning middleware to all /api routes
+app.use('/api', apiVersioning);
 
-// API routes
-app.use('/api/auth', authRoutes);
-app.use('/api/wallets', walletRoutes);
-app.use('/api/transactions', transactionRoutes);
-app.use('/api/user', userRoutes);
-app.use('/api/recovery', recoveryRoutes);
-app.use('/api/analytics', analyticsRoutes);
-app.use('/api/token', tokenRoutes);
-app.use('/api/events', eventIndexerRoutes);
+// Mount versioned routes
+app.use('/api/v1', v1Routes);
+app.use('/api/v2', v2Routes);
+
+// Default route for /api (redirects to current version)
+app.use('/api', (req, res, next) => {
+  // If no version specified, redirect to current version
+  if (!req.path.startsWith('/v')) {
+    const versionedPath = `/api/${CURRENT_VERSION}${req.path}`;
+    res.setHeader('Location', versionedPath);
+    res.status(301).json({
+      success: false,
+      error: {
+        code: 'VERSION_REQUIRED',
+        message: 'API version is required. Please use a versioned endpoint.',
+        redirectTo: versionedPath,
+        supportedVersions: ['v1', 'v2'],
+        recommendedVersion: CURRENT_VERSION
+      }
+    });
+    return;
+  }
+  next();
+});
 
 // Socket.io setup
 setupSocketHandlers(io);
