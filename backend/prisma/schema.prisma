@@ -375,3 +375,22 @@ model EventIndexerState {
   
   @@map("event_indexer_state")
 }
+
+model DeadLetterQueue {
+  id            String   @id @db.VarChar(255)
+  originalQueue String   @map("original_queue") @db.VarChar(255)
+  payload       Json     @db.JsonB
+  error         String   @db.Text
+  attempts      Int      @default(0)
+  firstAttempt  DateTime @map("first_attempt")
+  lastAttempt   DateTime @map("last_attempt")
+  retryHistory  Json     @default("[]") @map("retry_history") @db.JsonB
+  metadata      Json     @default("{}") @db.JsonB
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([originalQueue], name: "idx_dlq_original_queue")
+  @@index([createdAt], name: "idx_dlq_created_at")
+  @@index([lastAttempt], name: "idx_dlq_last_attempt")
+  @@map("dead_letter_queue")
+}
