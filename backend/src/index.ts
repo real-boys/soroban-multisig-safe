@@ -28,6 +28,7 @@ import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
 import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
+import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
 
 dotenv.config();
 
@@ -134,6 +135,23 @@ logger.info('Resource Monitor initialized');
 deadLetterQueueService.start();
 logger.info('Dead Letter Queue Service initialized');
 
+// Initialize Circuit Breaker Monitor Service
+circuitBreakerMonitorService.start();
+logger.info('Circuit Breaker Monitor Service initialized');
+
+// Set up alert callback for circuit breakers
+circuitBreakerMonitorService.onAlert((alert) => {
+  // You can integrate with external alerting systems here
+  // For example: send to Slack, PagerDuty, email, etc.
+  if (alert.severity === 'critical') {
+    logger.error(`CRITICAL ALERT: ${alert.message}`, {
+      circuit: alert.circuitName,
+      state: alert.state,
+      failures: alert.failures,
+    });
+  }
+});
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -183,6 +201,7 @@ async function gracefulShutdown(signal: string) {
   resourceMonitor.stop();
   cronService.stop();
   deadLetterQueueService.stop();
+  circuitBreakerMonitorService.stop();
   
   // Close server
   server.close(async () => {

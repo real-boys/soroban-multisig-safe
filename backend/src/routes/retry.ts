@@ -12,6 +12,10 @@ import {
   resetCircuitBreaker,
   getRPCProviderStats,
   resetRPCProviders,
+  getCircuitBreakerHealthReport,
+  getCircuitBreakerMetrics,
+  getCircuitBreakerAlerts,
+  clearCircuitBreakerAlerts,
 } from '@/controllers/RetryController';
 import { authMiddleware } from '@/middleware/auth';
 
@@ -48,6 +52,18 @@ router.delete('/dlq/queue/:queueName', authMiddleware, clearDLQQueue);
 
 // Get all circuit breaker statistics
 router.get('/circuit-breaker/stats', authMiddleware, getCircuitBreakerStats);
+
+// Get comprehensive health report
+router.get('/circuit-breaker/health', authMiddleware, getCircuitBreakerHealthReport);
+
+// Get metrics for monitoring systems
+router.get('/circuit-breaker/metrics', authMiddleware, getCircuitBreakerMetrics);
+
+// Get alert history
+router.get('/circuit-breaker/alerts', authMiddleware, getCircuitBreakerAlerts);
+
+// Clear alert history
+router.delete('/circuit-breaker/alerts', authMiddleware, clearCircuitBreakerAlerts);
 
 // Get specific circuit breaker status
 router.get('/circuit-breaker/:circuitName', authMiddleware, getCircuitBreakerStatus);
