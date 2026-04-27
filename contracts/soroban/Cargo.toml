@@ -15,8 +15,6 @@ soroban-sdk = { workspace = true }
 soroban-token-sdk = { workspace = true }
 stellar-xdr = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
