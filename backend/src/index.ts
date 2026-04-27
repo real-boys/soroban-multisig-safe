@@ -11,7 +11,7 @@ import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
 import { rateLimiter } from '@/middleware/rateLimiter';
 import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
-import { connectDatabase } from '@/config/database';
+import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
 // Versioned routes

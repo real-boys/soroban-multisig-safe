@@ -11,6 +11,7 @@ import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
 import tokenRoutes from '@/routes/token';
 import eventIndexerRoutes from '@/routes/eventIndexer';
+import rateLimitRoutes from '@/routes/rateLimit';
 
 const router = Router();
 
@@ -27,5 +28,6 @@ router.use('/analytics', analyticsRoutes);
 router.use('/health', healthRoutes);
 router.use('/token', tokenRoutes);
 router.use('/events', eventIndexerRoutes);
+router.use('/rate-limit', rateLimitRoutes);
 
 export default router;

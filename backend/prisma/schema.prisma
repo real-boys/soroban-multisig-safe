@@ -16,6 +16,7 @@ model User {
   password  String
   stellarAddress String @unique
   isActive  Boolean  @default(true)
+  rateLimitTier String @default("FREE") // Rate limit tier: FREE, BASIC, PREMIUM, ENTERPRISE
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
