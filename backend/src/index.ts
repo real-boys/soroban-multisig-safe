@@ -16,9 +16,17 @@ import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
 import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
-// Versioned routes
-import v1Routes from '@/routes/v1';
-import v2Routes from '@/routes/v2';
+// Routes
+import authRoutes from '@/routes/auth';
+import walletRoutes from '@/routes/wallet';
+import transactionRoutes from '@/routes/transaction';
+import userRoutes from '@/routes/user';
+import recoveryRoutes from '@/routes/recovery';
+import analyticsRoutes from '@/routes/analytics';
+import healthRoutes from '@/routes/health';
+import tokenRoutes from '@/routes/token';
+import eventIndexerRoutes from '@/routes/eventIndexer';
+import taskRoutes from '@/routes/tasks';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
@@ -32,6 +40,13 @@ import { ResourceMonitor } from '@/services/ResourceMonitor';
 import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
 import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
 import { RateLimitQueueService } from '@/services/RateLimitQueueService';
+
+// Task Management Services
+import { taskSchedulerService } from '@/services/TaskSchedulerService';
+import { distributedExecutionService } from '@/services/DistributedExecutionService';
+import { taskFailureHandlerService } from '@/services/TaskFailureHandlerService';
+import { taskMonitoringService } from '@/services/TaskMonitoringService';
+import { taskHandlerIntegration } from '@/services/TaskHandlerIntegration';
 
 dotenv.config();
 
@@ -63,47 +78,16 @@ app.use(rateLimiter);
 // Apply API versioning middleware to all /api routes
 app.use('/api', apiVersioning);
 
-// Apply user-based rate limiting to authenticated API routes (optional auth)
-app.use('/api', (req, res, next) => {
-  // Try to authenticate, but don't fail if no token
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    try {
-      const token = authHeader.split(' ')[1];
-      const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-      req.user = decoded;
-    } catch (error) {
-      // Invalid token, but continue without user context
-      logger.debug('Invalid token in rate limiter:', error);
-    }
-  }
-  next();
-}, userRateLimiter());
-
-// Mount versioned routes
-app.use('/api/v1', v1Routes);
-app.use('/api/v2', v2Routes);
-
-// Default route for /api (redirects to current version)
-app.use('/api', (req, res, next) => {
-  // If no version specified, redirect to current version
-  if (!req.path.startsWith('/v')) {
-    const versionedPath = `/api/${CURRENT_VERSION}${req.path}`;
-    res.setHeader('Location', versionedPath);
-    res.status(301).json({
-      success: false,
-      error: {
-        code: 'VERSION_REQUIRED',
-        message: 'API version is required. Please use a versioned endpoint.',
-        redirectTo: versionedPath,
-        supportedVersions: ['v1', 'v2'],
-        recommendedVersion: CURRENT_VERSION
-      }
-    });
-    return;
-  }
-  next();
-});
+// API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/wallets', walletRoutes);
+app.use('/api/transactions', transactionRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/recovery', recoveryRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/token', tokenRoutes);
+app.use('/api/events', eventIndexerRoutes);
+app.use('/api/tasks', taskRoutes);
 
 // Socket.io setup
 setupSocketHandlers(io);
@@ -153,31 +137,6 @@ const resourceMonitor = new ResourceMonitor(Number(process.env.RESOURCE_CHECK_IN
 resourceMonitor.start();
 logger.info('Resource Monitor initialized');
 
-// Initialize Dead Letter Queue Service
-deadLetterQueueService.start();
-logger.info('Dead Letter Queue Service initialized');
-
-// Initialize Circuit Breaker Monitor Service
-circuitBreakerMonitorService.start();
-logger.info('Circuit Breaker Monitor Service initialized');
-
-// Initialize Rate Limit Queue Service
-const rateLimitQueueService = new RateLimitQueueService();
-rateLimitQueueService.start();
-logger.info('Rate Limit Queue Service initialized');
-
-// Set up alert callback for circuit breakers
-circuitBreakerMonitorService.onAlert((alert) => {
-  // You can integrate with external alerting systems here
-  // For example: send to Slack, PagerDuty, email, etc.
-  if (alert.severity === 'critical') {
-    logger.error(`CRITICAL ALERT: ${alert.message}`, {
-      circuit: alert.circuitName,
-      state: alert.state,
-      failures: alert.failures,
-    });
-  }
-});
 
 // Error handling middleware
 app.use(errorHandler);
@@ -202,6 +161,17 @@ async function startServer() {
     // Connect to Redis
     await connectRedis();
     logger.info('Redis connected successfully');
+
+    // Initialize Task Management Services
+    logger.info('Initializing Task Management Services...');
+    await distributedExecutionService.start();
+    await taskSchedulerService.start();
+    await taskMonitoringService.start();
+    taskFailureHandlerService.startDeadLetterProcessor();
+    
+    // Migrate existing cron jobs and register handlers
+    await taskHandlerIntegration.migrateExistingCronJobs();
+    logger.info('Task Management Services initialized');
 
     // Start server
     server.listen(PORT, () => {
