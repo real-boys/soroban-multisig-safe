@@ -4,12 +4,14 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 
 import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
-import { rateLimiter } from '@/middleware/rateLimiter';
+import { rateLimiter, userRateLimiter } from '@/middleware/rateLimiter';
+import { authMiddleware } from '@/middleware/auth';
 import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
 import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
@@ -29,6 +31,7 @@ import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
 import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
 import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
+import { RateLimitQueueService } from '@/services/RateLimitQueueService';
 
 dotenv.config();
 
@@ -53,10 +56,29 @@ app.use(cors({
 app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Apply IP-based rate limiting first (fallback for unauthenticated requests)
 app.use(rateLimiter);
 
 // Apply API versioning middleware to all /api routes
 app.use('/api', apiVersioning);
+
+// Apply user-based rate limiting to authenticated API routes (optional auth)
+app.use('/api', (req, res, next) => {
+  // Try to authenticate, but don't fail if no token
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const token = authHeader.split(' ')[1];
+      const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+      req.user = decoded;
+    } catch (error) {
+      // Invalid token, but continue without user context
+      logger.debug('Invalid token in rate limiter:', error);
+    }
+  }
+  next();
+}, userRateLimiter());
 
 // Mount versioned routes
 app.use('/api/v1', v1Routes);
@@ -139,6 +161,11 @@ logger.info('Dead Letter Queue Service initialized');
 circuitBreakerMonitorService.start();
 logger.info('Circuit Breaker Monitor Service initialized');
 
+// Initialize Rate Limit Queue Service
+const rateLimitQueueService = new RateLimitQueueService();
+rateLimitQueueService.start();
+logger.info('Rate Limit Queue Service initialized');
+
 // Set up alert callback for circuit breakers
 circuitBreakerMonitorService.onAlert((alert) => {
   // You can integrate with external alerting systems here
@@ -202,6 +229,7 @@ async function gracefulShutdown(signal: string) {
   cronService.stop();
   deadLetterQueueService.stop();
   circuitBreakerMonitorService.stop();
+  rateLimitQueueService.stop();
   
   // Close server
   server.close(async () => {

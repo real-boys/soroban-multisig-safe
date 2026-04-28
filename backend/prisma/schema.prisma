@@ -10,12 +10,20 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserTier {
+  FREE
+  PRO
+  ENTERPRISE
+  ADMIN
+}
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
   password  String
   stellarAddress String @unique
   isActive  Boolean  @default(true)
+  tier      UserTier @default(FREE)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -28,6 +36,7 @@ model User {
   walletSettings UserWalletSettings[]
   invitations    Invitation[] @relation("ReceivedInvitations")
   sentInvites    Invitation[] @relation("SentInvitations")
+  rateLimitUsage RateLimitUsage[]
 
   @@map("users")
 }
@@ -109,6 +118,13 @@ model Wallet {
   owners       WalletOwner[]
   transactions Transaction[]
   recoveries   Recovery[]
+  userSettings UserWalletSettings[]
+  invitations  Invitation[]
+  tokenBalances TokenBalance[]
+  transactionHistory TransactionHistory[]
+  heartbeats   Heartbeat[]
+  signerWeights SignerWeight[]
+  signerChangeProposals SignerChangeProposal[]
 
   @@map("wallets")
 }
@@ -261,6 +277,29 @@ model RateLimit {
   @@map("rate_limits")
 }
 
+model RateLimitUsage {
+  id          String   @id @default(cuid())
+  userId      String
+  endpoint    String
+  method      String   // HTTP method (GET, POST, etc.)
+  tokens      Int      // Current token count
+  maxTokens   Int      // Maximum tokens allowed
+  windowStart DateTime // Start of current window
+  windowEnd   DateTime // End of current window
+  burstUsed   Int      @default(0) // Burst tokens used
+  maxBurst    Int      // Maximum burst tokens allowed
+  lastRequest DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, endpoint, method])
+  @@index([userId, lastRequest])
+  @@index([windowEnd])
+  @@map("rate_limit_usage")
+}
+
 model TokenBalance {
   id          String   @id @default(cuid())
   walletId    String
@@ -338,7 +377,7 @@ model SignerChangeProposal {
   proposalType    String   // 'ADD_SIGNER', 'REMOVE_SIGNER', 'CHANGE_WEIGHT'
   targetAddress   String?
   newWeight       Int?
-  status          String   @default('PENDING') // 'PENDING', 'APPROVED', 'REJECTED', 'EXECUTED'
+  status          String   @default("PENDING") // 'PENDING', 'APPROVED', 'REJECTED', 'EXECUTED'
   votes           Json?    // Store vote data
   executedAt      DateTime?
   createdAt       DateTime @default(now())

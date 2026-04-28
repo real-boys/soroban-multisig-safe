@@ -12,6 +12,7 @@ import healthRoutes from '@/routes/health';
 import tokenRoutes from '@/routes/token';
 import eventIndexerRoutes from '@/routes/eventIndexer';
 import retryRoutes from '@/routes/retry';
+import rateLimitRoutes from '@/routes/rateLimit';
 
 const router = Router();
 
@@ -29,5 +30,6 @@ router.use('/health', healthRoutes);
 router.use('/token', tokenRoutes);
 router.use('/events', eventIndexerRoutes);
 router.use('/retry', retryRoutes);
+router.use('/rate-limits', rateLimitRoutes);
 
 export default router;
