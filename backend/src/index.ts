@@ -4,13 +4,16 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 
 import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
-import { rateLimiter } from '@/middleware/rateLimiter';
-import { connectDatabase } from '@/config/database';
+import { rateLimiter, userRateLimiter } from '@/middleware/rateLimiter';
+import { authMiddleware } from '@/middleware/auth';
+import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
+import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
 // Routes
@@ -59,10 +62,12 @@ app.use(cors({
 app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Apply IP-based rate limiting first (fallback for unauthenticated requests)
 app.use(rateLimiter);
 
-// Health check endpoint
-app.use('/api/health', healthRoutes);
+// Apply API versioning middleware to all /api routes
+app.use('/api', apiVersioning);
 
 // API routes
 app.use('/api/auth', authRoutes);
@@ -126,6 +131,7 @@ const resourceMonitor = new ResourceMonitor(Number(process.env.RESOURCE_CHECK_IN
 resourceMonitor.start();
 logger.info('Resource Monitor initialized');
 
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -149,6 +155,17 @@ async function startServer() {
     // Connect to Redis
     await connectRedis();
     logger.info('Redis connected successfully');
+
+    // Initialize Task Management Services
+    logger.info('Initializing Task Management Services...');
+    await distributedExecutionService.start();
+    await taskSchedulerService.start();
+    await taskMonitoringService.start();
+    taskFailureHandlerService.startDeadLetterProcessor();
+    
+    // Migrate existing cron jobs and register handlers
+    await taskHandlerIntegration.migrateExistingCronJobs();
+    logger.info('Task Management Services initialized');
 
     // Start server
     server.listen(PORT, () => {
@@ -174,6 +191,9 @@ async function gracefulShutdown(signal: string) {
   databaseBackupService.stop();
   resourceMonitor.stop();
   cronService.stop();
+  deadLetterQueueService.stop();
+  circuitBreakerMonitorService.stop();
+  rateLimitQueueService.stop();
   
   // Close server
   server.close(async () => {

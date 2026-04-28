@@ -10,12 +10,20 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserTier {
+  FREE
+  PRO
+  ENTERPRISE
+  ADMIN
+}
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
   password  String
   stellarAddress String @unique
   isActive  Boolean  @default(true)
+  tier      UserTier @default(FREE)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -28,6 +36,8 @@ model User {
   walletSettings UserWalletSettings[]
   invitations    Invitation[] @relation("ReceivedInvitations")
   sentInvites    Invitation[] @relation("SentInvitations")
+  createdTasks   ScheduledTask[] @relation("CreatedTasks")
+  taskTemplates  TaskTemplate[] @relation("TaskTemplates")
 
   @@map("users")
 }
@@ -109,6 +119,13 @@ model Wallet {
   owners       WalletOwner[]
   transactions Transaction[]
   recoveries   Recovery[]
+  userSettings UserWalletSettings[]
+  invitations  Invitation[]
+  tokenBalances TokenBalance[]
+  transactionHistory TransactionHistory[]
+  heartbeats   Heartbeat[]
+  signerWeights SignerWeight[]
+  signerChangeProposals SignerChangeProposal[]
 
   @@map("wallets")
 }
@@ -261,6 +278,29 @@ model RateLimit {
   @@map("rate_limits")
 }
 
+model RateLimitUsage {
+  id          String   @id @default(cuid())
+  userId      String
+  endpoint    String
+  method      String   // HTTP method (GET, POST, etc.)
+  tokens      Int      // Current token count
+  maxTokens   Int      // Maximum tokens allowed
+  windowStart DateTime // Start of current window
+  windowEnd   DateTime // End of current window
+  burstUsed   Int      @default(0) // Burst tokens used
+  maxBurst    Int      // Maximum burst tokens allowed
+  lastRequest DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, endpoint, method])
+  @@index([userId, lastRequest])
+  @@index([windowEnd])
+  @@map("rate_limit_usage")
+}
+
 model TokenBalance {
   id          String   @id @default(cuid())
   walletId    String
@@ -338,7 +378,7 @@ model SignerChangeProposal {
   proposalType    String   // 'ADD_SIGNER', 'REMOVE_SIGNER', 'CHANGE_WEIGHT'
   targetAddress   String?
   newWeight       Int?
-  status          String   @default('PENDING') // 'PENDING', 'APPROVED', 'REJECTED', 'EXECUTED'
+  status          String   @default("PENDING") // 'PENDING', 'APPROVED', 'REJECTED', 'EXECUTED'
   votes           Json?    // Store vote data
   executedAt      DateTime?
   createdAt       DateTime @default(now())
@@ -375,3 +415,131 @@ model EventIndexerState {
   
   @@map("event_indexer_state")
 }
+
+// Task Management System Models
+model ScheduledTask {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  taskType        String   // 'WEEKLY_SUMMARY', 'MONTHLY_AUDIT', 'FILE_CLEANUP', 'CUSTOM', etc.
+  cronExpression  String
+  timezone        String   @default("UTC")
+  isActive        Boolean  @default(true)
+  priority        Int      @default(5) // 1-10, lower number = higher priority
+  maxRetries      Int      @default(3)
+  timeoutMs       Int      @default(300000) // 5 minutes default
+  createdBy       String?  // User ID who created this task
+  metadata        Json?    // Additional task configuration
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  runCount        Int      @default(0)
+  successCount    Int      @default(0)
+  failureCount    Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  executions      TaskExecution[]
+  creator         User?    @relation("CreatedTasks", fields: [createdBy], references: [id], onDelete: SetNull)
+  
+  @@map("scheduled_tasks")
+}
+
+model TaskExecution {
+  id              String   @id @default(cuid())
+  taskId          String
+  jobId           String?  // Bull queue job ID
+  status          String   @default("PENDING") // 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT'
+  startedAt       DateTime?
+  completedAt     DateTime?
+  durationMs      BigInt?  // Execution duration in milliseconds
+  result          Json?    // Task execution result
+  errorMessage    String?
+  errorStack      String?
+  retryCount      Int      @default(0)
+  workerId        String?  // ID of the worker that processed this task
+  nodeId          String?  // ID of the node that processed this task (for distributed execution)
+  metadata        Json?    // Execution metadata
+  
+  // Relations
+  task            ScheduledTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  logs            TaskLog[]
+  
+  @@index([taskId, status])
+  @@index([status, startedAt])
+  @@index([workerId])
+  @@index([nodeId])
+  @@map("task_executions")
+}
+
+model TaskLog {
+  id              String   @id @default(cuid())
+  executionId     String
+  level           String   // 'DEBUG', 'INFO', 'WARN', 'ERROR'
+  message         String
+  timestamp       DateTime @default(now())
+  metadata        Json?
+  
+  // Relations
+  execution       TaskExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  
+  @@index([executionId, timestamp])
+  @@index([level, timestamp])
+  @@map("task_logs")
+}
+
+model WorkerNode {
+  id              String   @id @default(cuid())
+  nodeId          String   @unique // Unique identifier for this worker node
+  hostname        String
+  ipAddress       String?
+  version         String?  // Application version
+  status          String   @default("ONLINE") // 'ONLINE', 'OFFLINE', 'MAINTENANCE'
+  capabilities    Json?    // Worker capabilities and configuration
+  lastHeartbeat   DateTime @default(now())
+  currentLoad     Int      @default(0) // Number of currently running tasks
+  maxConcurrency  Int      @default(10) // Maximum concurrent tasks
+  totalProcessed  BigInt   @default(0) // Total tasks processed
+  totalFailed     BigInt   @default(0) // Total tasks failed
+  metadata        Json?    // Additional node metadata
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([status, lastHeartbeat])
+  @@index([nodeId])
+  @@map("worker_nodes")
+}
+
+model TaskDependency {
+  id              String   @id @default(cuid())
+  taskId          String
+  dependsOnTaskId String
+  dependencyType  String   @default("SUCCESS") // 'SUCCESS', 'COMPLETION', 'FAILURE'
+  
+  task            ScheduledTask @relation("TaskDependencies", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOnTask   ScheduledTask @relation("DependentTasks", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+  
+  @@unique([taskId, dependsOnTaskId])
+  @@map("task_dependencies")
+}
+
+model TaskTemplate {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  description     String?
+  taskType        String
+  defaultCron     String?
+  defaultTimeout  Int      @default(300000)
+  defaultRetries  Int      @default(3)
+  configuration   Json     // Template configuration schema
+  isActive        Boolean  @default(true)
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  creator         User?    @relation("TaskTemplates", fields: [createdBy], references: [id], onDelete: SetNull)
+  
+  @@map("task_templates")
+}
+
