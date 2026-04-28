@@ -1,6 +1,10 @@
 import nodemailer from 'nodemailer';
 import { format } from 'date-fns';
 import { AnalyticsService } from './AnalyticsService';
+import { circuitBreakerService } from './CircuitBreakerService';
+import { retryService } from './RetryService';
+import { EMAIL_RETRY_CONFIG } from '@/config/retryConfig';
+import { logger } from '@/utils/logger';
 
 export interface WeeklySummaryData {
   weekStart: Date;
@@ -17,6 +21,8 @@ export interface WeeklySummaryData {
 export class EmailService {
   private transporter: nodemailer.Transporter;
   private analyticsService: AnalyticsService;
+  private readonly circuitName = 'email-service';
+  private fallbackEmailQueue: Array<{ mailOptions: any; timestamp: Date }> = [];
 
   constructor() {
     this.analyticsService = new AnalyticsService();
@@ -75,7 +81,128 @@ export class EmailService {
       html: htmlContent,
     };
 
-    await this.transporter.sendMail(mailOptions);
+    await this.sendEmailWithCircuitBreaker(mailOptions);
+  }
+
+  /**
+   * Send email with circuit breaker protection and retry logic
+   */
+  private async sendEmailWithCircuitBreaker(mailOptions: any): Promise<void> {
+    try {
+      await circuitBreakerService.execute(
+        this.circuitName,
+        async () => {
+          const result = await retryService.executeWithRetry(
+            async () => {
+              return await this.transporter.sendMail(mailOptions);
+            },
+            {
+              ...EMAIL_RETRY_CONFIG,
+              onRetry: (attempt, error, delay) => {
+                logger.warn(
+                  `Email send failed (attempt ${attempt}): ${error.message}. ` +
+                  `Retrying in ${delay}ms...`
+                );
+              },
+            }
+          );
+
+          if (!result.success) {
+            throw result.error || new Error('Email send failed');
+          }
+
+          return result.result;
+        },
+        {
+          failureThreshold: 5,
+          successThreshold: 2,
+          timeout: 300000, // 5 minutes
+          monitoringPeriod: 600000, // 10 minutes
+        }
+      );
+
+      logger.info(`Email sent successfully to ${mailOptions.to}`);
+    } catch (error: any) {
+      logger.error(`Failed to send email to ${mailOptions.to}:`, error);
+      
+      // Fallback: Queue email for later retry
+      if (error.circuitState === 'OPEN') {
+        logger.warn('Email circuit breaker is OPEN, queueing email for later');
+        this.queueEmailForLater(mailOptions);
+      }
+      
+      throw error;
+    }
+  }
+
+  /**
+   * Queue email for later retry when circuit is open
+   */
+  private queueEmailForLater(mailOptions: any): void {
+    this.fallbackEmailQueue.push({
+      mailOptions,
+      timestamp: new Date(),
+    });
+
+    // Limit queue size to prevent memory issues
+    if (this.fallbackEmailQueue.length > 1000) {
+      this.fallbackEmailQueue.shift();
+      logger.warn('Email fallback queue is full, removing oldest email');
+    }
+  }
+
+  /**
+   * Process queued emails (should be called periodically)
+   */
+  async processQueuedEmails(): Promise<void> {
+    if (this.fallbackEmailQueue.length === 0) {
+      return;
+    }
+
+    // Check if circuit is closed
+    if (circuitBreakerService.isOpen(this.circuitName)) {
+      logger.info('Email circuit is still open, skipping queued emails');
+      return;
+    }
+
+    logger.info(`Processing ${this.fallbackEmailQueue.length} queued emails`);
+
+    const emailsToProcess = [...this.fallbackEmailQueue];
+    this.fallbackEmailQueue = [];
+
+    for (const { mailOptions, timestamp } of emailsToProcess) {
+      try {
+        // Skip emails older than 24 hours
+        const age = Date.now() - timestamp.getTime();
+        if (age > 24 * 60 * 60 * 1000) {
+          logger.warn(`Skipping email older than 24 hours: ${mailOptions.to}`);
+          continue;
+        }
+
+        await this.sendEmailWithCircuitBreaker(mailOptions);
+      } catch (error) {
+        logger.error(`Failed to process queued email:`, error);
+        // Re-queue if still failing
+        this.fallbackEmailQueue.push({ mailOptions, timestamp });
+      }
+    }
+  }
+
+  /**
+   * Get email service health status
+   */
+  getHealthStatus(): {
+    circuitState: string;
+    queuedEmails: number;
+    isHealthy: boolean;
+  } {
+    const stats = circuitBreakerService.getStats(this.circuitName);
+    
+    return {
+      circuitState: stats?.state || 'UNKNOWN',
+      queuedEmails: this.fallbackEmailQueue.length,
+      isHealthy: stats?.state === 'CLOSED' || stats?.state === 'HALF_OPEN',
+    };
   }
 
   /**
@@ -313,9 +440,9 @@ export class EmailService {
         })),
       };
 
-      await this.transporter.sendMail(mailOptions);
+      await this.sendEmailWithCircuitBreaker(mailOptions);
     } catch (error) {
-      console.error('Error sending audit report email:', error);
+      logger.error('Error sending audit report email:', error);
       throw new Error('Failed to send audit report email');
     }
   }

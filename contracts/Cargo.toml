@@ -6,6 +6,3 @@ resolver = "2"
 soroban-sdk = "20.0.0"
 soroban-token-sdk = "20.0.0"
 stellar-xdr = { version = "20.0.0", default-features = false }
-thiserror = "1.0.45"
-serde = { version = "1.0.192", features = ["derive"] }
-serde_json = "1.0.149"
