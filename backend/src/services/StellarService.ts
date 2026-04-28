@@ -10,11 +10,15 @@ import {
   Operation
 } from '@stellar/stellar-sdk';
 import { logger } from '@/utils/logger';
+import { circuitBreakerService } from './CircuitBreakerService';
+import { retryService } from './RetryService';
+import { TRANSACTION_SUBMISSION_RETRY_CONFIG } from '@/config/retryConfig';
 
 export class StellarService {
   private network: string;
   private server: Server;
   private networkPassphrase: string;
+  private readonly circuitName = 'stellar-service';
 
   constructor() {
     this.network = process.env.STELLAR_NETWORK || 'futurenet';
@@ -113,21 +117,54 @@ export class StellarService {
     try {
       logger.info(`Relaying multisig transaction to contract ${contractAddress}`);
 
-      // In a real implementation:
-      // 1. Build the Soroban transaction that calls 'execute_transaction'
-      // 2. Add signature fragments (if off-chain aggregation is used)
-      // 3. Or check on-chain signatures and just trigger 'execute'
-      
-      // Mocking submission result
-      const isFeeSponsored = process.env.ENABLE_FEE_SPONSORSHIP === 'true';
-      
-      if (isFeeSponsored) {
-        return this.feeBumpTransaction(contractAddress, transactionRecord);
-      }
+      // Execute with circuit breaker and retry logic
+      const result = await circuitBreakerService.execute(
+        this.circuitName,
+        async () => {
+          const retryResult = await retryService.executeWithRetry(
+            async () => {
+              // In a real implementation:
+              // 1. Build the Soroban transaction that calls 'execute_transaction'
+              // 2. Add signature fragments (if off-chain aggregation is used)
+              // 3. Or check on-chain signatures and just trigger 'execute'
+              
+              // Mocking submission result
+              const isFeeSponsored = process.env.ENABLE_FEE_SPONSORSHIP === 'true';
+              
+              if (isFeeSponsored) {
+                return await this.feeBumpTransaction(contractAddress, transactionRecord);
+              }
 
-      // Simple mock success
-      const txHash = 'TX' + Math.random().toString(36).substring(2, 60).toUpperCase();
-      return { success: true, txHash };
+              // Simple mock success
+              const txHash = 'TX' + Math.random().toString(36).substring(2, 60).toUpperCase();
+              return { success: true, txHash };
+            },
+            {
+              ...TRANSACTION_SUBMISSION_RETRY_CONFIG,
+              onRetry: (attempt, error, delay) => {
+                logger.warn(
+                  `Transaction submission failed (attempt ${attempt}): ${error.message}. ` +
+                  `Retrying in ${delay}ms...`
+                );
+              },
+            }
+          );
+
+          if (!retryResult.success) {
+            throw retryResult.error || new Error('Transaction submission failed');
+          }
+
+          return retryResult.result!;
+        },
+        {
+          failureThreshold: 5,
+          successThreshold: 2,
+          timeout: 60000, // 1 minute
+          monitoringPeriod: 120000, // 2 minutes
+        }
+      );
+
+      return result;
 
     } catch (error: any) {
       logger.error('Error in submitMultisigTransaction:', error);
@@ -164,5 +201,20 @@ export class StellarService {
       logger.error('Error in feeBumpTransaction:', error);
       return { success: false, error: 'FEE_BUMP_FAILED: ' + error.message };
     }
+  }
+
+  /**
+   * Get service health status
+   */
+  getHealthStatus(): {
+    circuitState: string;
+    isHealthy: boolean;
+  } {
+    const stats = circuitBreakerService.getStats(this.circuitName);
+    
+    return {
+      circuitState: stats?.state || 'UNKNOWN',
+      isHealthy: stats?.state === 'CLOSED' || stats?.state === 'HALF_OPEN',
+    };
   }
 }

@@ -1,5 +1,9 @@
 import { logger } from '@/utils/logger';
 import axios from 'axios';
+import { circuitBreakerService } from './CircuitBreakerService';
+import { retryService } from './RetryService';
+import { RPC_RETRY_CONFIG } from '@/config/retryConfig';
+import { RetryStrategy, JitterType } from '@/types/retry';
 
 interface TokenInfo {
   contractId: string;
@@ -26,6 +30,9 @@ interface PriceData {
 export class TokenService {
   private coingeckoApiUrl = 'https://api.coingecko.com/api/v3';
   private stellarRpcUrl: string;
+  private readonly rpcCircuitName = 'token-service-rpc';
+  private readonly priceCircuitName = 'token-service-price';
+  private priceCache: Map<string, { data: PriceData; timestamp: number }> = new Map();
   
   // Known tokens on Stellar
   private knownTokens: Map<string, TokenInfo> = new Map([
@@ -93,27 +100,31 @@ export class TokenService {
    */
   private async getNativeBalance(address: string): Promise<bigint> {
     try {
-      const response = await axios.post(this.stellarRpcUrl, {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getLedgerEntries',
-        params: {
-          keys: [this.createAccountKey(address)],
-        },
+      const result = await this.executeRPCWithCircuitBreaker(async () => {
+        const response = await axios.post(this.stellarRpcUrl, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getLedgerEntries',
+          params: {
+            keys: [this.createAccountKey(address)],
+          },
+        });
+
+        if (!response.data.result?.entries?.[0]) {
+          return 0n;
+        }
+
+        // Parse XDR and extract balance
+        const entry = response.data.result.entries[0];
+        const accountData = this.parseAccountEntry(entry.xdr);
+        
+        return BigInt(accountData.balance);
       });
 
-      if (!response.data.result?.entries?.[0]) {
-        return 0n;
-      }
-
-      // Parse XDR and extract balance
-      const entry = response.data.result.entries[0];
-      const accountData = this.parseAccountEntry(entry.xdr);
-      
-      return BigInt(accountData.balance);
+      return result;
     } catch (error) {
       logger.error('Error fetching native balance:', error);
-      return 0n;
+      return 0n; // Fallback to 0 balance
     }
   }
 
@@ -159,22 +170,26 @@ export class TokenService {
     tokenContractId: string
   ): Promise<bigint> {
     try {
-      const response = await axios.post(this.stellarRpcUrl, {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'invokeContractRead',
-        params: {
-          contract_id: tokenContractId,
-          function_name: 'balance',
-          args: [walletAddress],
-        },
+      const result = await this.executeRPCWithCircuitBreaker(async () => {
+        const response = await axios.post(this.stellarRpcUrl, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'invokeContractRead',
+          params: {
+            contract_id: tokenContractId,
+            function_name: 'balance',
+            args: [walletAddress],
+          },
+        });
+
+        if (!response.data.result?.result) {
+          return 0n;
+        }
+
+        return BigInt(response.data.result.result);
       });
 
-      if (!response.data.result?.result) {
-        return 0n;
-      }
-
-      return BigInt(response.data.result.result);
+      return result;
     } catch (error) {
       // Token might not exist or not support standard interface
       return 0n;
@@ -186,6 +201,14 @@ export class TokenService {
    */
   async getTokenPrices(symbols: string[]): Promise<PriceData> {
     try {
+      // Check cache first (5 minute TTL)
+      const cacheKey = symbols.sort().join(',');
+      const cached = this.priceCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < 5 * 60 * 1000) {
+        logger.debug('Returning cached price data');
+        return cached.data;
+      }
+
       // Map Stellar symbols to CoinGecko IDs
       const coinGeckoIds: Map<string, string> = new Map([
         ['XLM', 'stellar'],
@@ -202,25 +225,78 @@ export class TokenService {
         return {};
       }
 
-      const response = await axios.get(`${this.coingeckoApiUrl}/simple/price`, {
-        params: {
-          ids,
-          vs_currencies: 'usd',
-          include_24hr_change: true,
+      const priceData = await circuitBreakerService.execute(
+        this.priceCircuitName,
+        async () => {
+          const result = await retryService.executeWithRetry(
+            async () => {
+              const response = await axios.get(`${this.coingeckoApiUrl}/simple/price`, {
+                params: {
+                  ids,
+                  vs_currencies: 'usd',
+                  include_24hr_change: true,
+                },
+                timeout: 5000,
+              });
+
+              // Map back to our symbols
+              const data: PriceData = {};
+              for (const [symbol, coinId] of coinGeckoIds.entries()) {
+                if (response.data[coinId]) {
+                  data[symbol] = response.data[coinId];
+                }
+              }
+
+              return data;
+            },
+            {
+              maxAttempts: 3,
+              initialDelay: 1000,
+              maxDelay: 5000,
+              strategy: RetryStrategy.EXPONENTIAL,
+              jitterType: JitterType.FULL,
+              backoffMultiplier: 2,
+              onRetry: (attempt, error, delay) => {
+                logger.warn(
+                  `Price fetch failed (attempt ${attempt}): ${error.message}. ` +
+                  `Retrying in ${delay}ms...`
+                );
+              },
+            }
+          );
+
+          if (!result.success) {
+            throw result.error || new Error('Price fetch failed');
+          }
+
+          return result.result!;
         },
+        {
+          failureThreshold: 5,
+          successThreshold: 2,
+          timeout: 60000, // 1 minute
+          monitoringPeriod: 120000, // 2 minutes
+        }
+      );
+
+      // Cache the result
+      this.priceCache.set(cacheKey, {
+        data: priceData,
+        timestamp: Date.now(),
       });
 
-      // Map back to our symbols
-      const priceData: PriceData = {};
-      for (const [symbol, coinId] of coinGeckoIds.entries()) {
-        if (response.data[coinId]) {
-          priceData[symbol] = response.data[coinId];
-        }
-      }
-
       return priceData;
-    } catch (error) {
+    } catch (error: any) {
       logger.error('Error fetching token prices:', error);
+      
+      // Fallback: Return cached data even if stale
+      const cacheKey = symbols.sort().join(',');
+      const cached = this.priceCache.get(cacheKey);
+      if (cached) {
+        logger.warn('Returning stale cached price data as fallback');
+        return cached.data;
+      }
+      
       return {};
     }
   }
@@ -323,44 +399,103 @@ export class TokenService {
    */
   private async fetchTokenInfo(contractId: string): Promise<TokenInfo | null> {
     try {
-      const [metadataResponse, decimalsResponse] = await Promise.all([
-        axios.post(this.stellarRpcUrl, {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'invokeContractRead',
-          params: {
-            contract_id: contractId,
-            function_name: 'metadata',
-            args: [],
-          },
-        }),
-        axios.post(this.stellarRpcUrl, {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'invokeContractRead',
-          params: {
-            contract_id: contractId,
-            function_name: 'decimals',
-            args: [],
-          },
-        }),
-      ]);
+      return await this.executeRPCWithCircuitBreaker(async () => {
+        const [metadataResponse, decimalsResponse] = await Promise.all([
+          axios.post(this.stellarRpcUrl, {
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'invokeContractRead',
+            params: {
+              contract_id: contractId,
+              function_name: 'metadata',
+              args: [],
+            },
+          }),
+          axios.post(this.stellarRpcUrl, {
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'invokeContractRead',
+            params: {
+              contract_id: contractId,
+              function_name: 'decimals',
+              args: [],
+            },
+          }),
+        ]);
 
-      const metadata = metadataResponse.data.result?.result || {};
-      const decimals = parseInt(decimalsResponse.data.result?.result || '7');
+        const metadata = metadataResponse.data.result?.result || {};
+        const decimals = parseInt(decimalsResponse.data.result?.result || '7');
 
-      return {
-        contractId,
-        symbol: metadata.symbol || 'UNKNOWN',
-        name: metadata.name || 'Unknown Token',
-        decimals,
-        iconUrl: '',
-        isVerified: false,
-      };
+        return {
+          contractId,
+          symbol: metadata.symbol || 'UNKNOWN',
+          name: metadata.name || 'Unknown Token',
+          decimals,
+          iconUrl: '',
+          isVerified: false,
+        };
+      });
     } catch (error) {
       logger.error('Error fetching token info:', error);
       return null;
     }
+  }
+
+  /**
+   * Execute RPC call with circuit breaker protection
+   */
+  private async executeRPCWithCircuitBreaker<T>(fn: () => Promise<T>): Promise<T> {
+    return await circuitBreakerService.execute(
+      this.rpcCircuitName,
+      async () => {
+        const result = await retryService.executeWithRetry(
+          fn,
+          {
+            ...RPC_RETRY_CONFIG,
+            onRetry: (attempt, error, delay) => {
+              logger.warn(
+                `Token RPC call failed (attempt ${attempt}): ${error.message}. ` +
+                `Retrying in ${delay}ms...`
+              );
+            },
+          }
+        );
+
+        if (!result.success) {
+          throw result.error || new Error('RPC call failed');
+        }
+
+        return result.result!;
+      },
+      {
+        failureThreshold: 10,
+        successThreshold: 3,
+        timeout: 30000,
+        monitoringPeriod: 60000,
+      }
+    );
+  }
+
+  /**
+   * Get service health status
+   */
+  getHealthStatus(): {
+    rpcCircuitState: string;
+    priceCircuitState: string;
+    cachedPrices: number;
+    isHealthy: boolean;
+  } {
+    const rpcStats = circuitBreakerService.getStats(this.rpcCircuitName);
+    const priceStats = circuitBreakerService.getStats(this.priceCircuitName);
+    
+    return {
+      rpcCircuitState: rpcStats?.state || 'UNKNOWN',
+      priceCircuitState: priceStats?.state || 'UNKNOWN',
+      cachedPrices: this.priceCache.size,
+      isHealthy: 
+        (rpcStats?.state === 'CLOSED' || rpcStats?.state === 'HALF_OPEN') &&
+        (priceStats?.state === 'CLOSED' || priceStats?.state === 'HALF_OPEN'),
+    };
   }
 
   /**

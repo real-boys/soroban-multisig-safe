@@ -4,13 +4,16 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 
 import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
-import { rateLimiter } from '@/middleware/rateLimiter';
-import { connectDatabase } from '@/config/database';
+import { rateLimiter, userRateLimiter } from '@/middleware/rateLimiter';
+import { authMiddleware } from '@/middleware/auth';
+import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
+import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
 // Routes
@@ -34,6 +37,9 @@ import { IndexerHealthChecker } from '@/services/IndexerHealthChecker';
 import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
+import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
+import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
+import { RateLimitQueueService } from '@/services/RateLimitQueueService';
 
 // Task Management Services
 import { taskSchedulerService } from '@/services/TaskSchedulerService';
@@ -65,10 +71,12 @@ app.use(cors({
 app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Apply IP-based rate limiting first (fallback for unauthenticated requests)
 app.use(rateLimiter);
 
-// Health check endpoint
-app.use('/api/health', healthRoutes);
+// Apply API versioning middleware to all /api routes
+app.use('/api', apiVersioning);
 
 // API routes
 app.use('/api/auth', authRoutes);
@@ -189,6 +197,9 @@ async function gracefulShutdown(signal: string) {
   databaseBackupService.stop();
   resourceMonitor.stop();
   cronService.stop();
+  deadLetterQueueService.stop();
+  circuitBreakerMonitorService.stop();
+  rateLimitQueueService.stop();
   
   // Close server
   server.close(async () => {
