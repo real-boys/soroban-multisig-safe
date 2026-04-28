@@ -1,6 +1,13 @@
 import { PrismaClient } from '@prisma/client';
 import { CreateWalletRequest, UpdateWalletRequest } from '@/types/wallet';
 import { Wallet, Transaction } from '@prisma/client';
+import {
+  BulkCreateWalletRequest,
+  BulkUpdateWalletRequest,
+  BulkDeleteWalletRequest,
+  BulkOperationContext,
+  BulkOperationError
+} from '@/types/bulk';
 
 export class WalletService {
   private prisma: PrismaClient;
@@ -420,5 +427,283 @@ export class WalletService {
     wallet.recoveryDelay = wallet.recoveryDelay || 7 * 24 * 60 * 60; // 7 days
 
     return wallet;
+  }
+
+  /**
+   * Bulk create wallets
+   */
+  async bulkCreateWallets(
+    requests: BulkCreateWalletRequest[],
+    context: BulkOperationContext
+  ): Promise<Wallet[]> {
+    const createdWallets: Wallet[] = [];
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        // Generate contract address (in real implementation, this would call Stellar service)
+        const contractAddress = `generated_contract_${Date.now()}_${i}`;
+        
+        const wallet = await this.createWallet({
+          ...request,
+          ownerId: context.userId,
+          contractAddress,
+          stellarNetwork: process.env.STELLAR_NETWORK || 'futurenet',
+        });
+
+        createdWallets.push(wallet);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'WALLET_CREATE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All wallet creation operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+
+    return createdWallets;
+  }
+
+  /**
+   * Bulk update wallets
+   */
+  async bulkUpdateWallets(
+    requests: BulkUpdateWalletRequest[],
+    context: BulkOperationContext
+  ): Promise<Wallet[]> {
+    const updatedWallets: Wallet[] = [];
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        const wallet = await this.updateWallet(request.id, context.userId, request);
+        
+        if (!wallet) {
+          throw new Error(`Wallet not found: ${request.id}`);
+        }
+
+        updatedWallets.push(wallet);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'WALLET_UPDATE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All wallet update operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+
+    return updatedWallets;
+  }
+
+  /**
+   * Bulk delete wallets (soft delete)
+   */
+  async bulkDeleteWallets(
+    requests: BulkDeleteWalletRequest[],
+    context: BulkOperationContext
+  ): Promise<void> {
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        const result = await this.prisma.wallet.updateMany({
+          where: {
+            id: request.id,
+            ownerId: context.userId,
+            isActive: true,
+          },
+          data: {
+            isActive: false,
+          },
+        });
+
+        if (result.count === 0) {
+          throw new Error(`Wallet not found or already deleted: ${request.id}`);
+        }
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'WALLET_DELETE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All wallet delete operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+  }
+
+  /**
+   * Bulk add owners to wallets
+   */
+  async bulkAddOwners(
+    requests: { walletId: string; ownerAddress: string }[],
+    context: BulkOperationContext
+  ): Promise<void> {
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        // Verify wallet ownership
+        const wallet = await this.getWalletById(request.walletId, context.userId);
+        if (!wallet) {
+          throw new Error(`Wallet not found: ${request.walletId}`);
+        }
+
+        await this.addOwner(request.walletId, request.ownerAddress);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'OWNER_ADD_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All add owner operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+  }
+
+  /**
+   * Bulk remove owners from wallets
+   */
+  async bulkRemoveOwners(
+    requests: { walletId: string; ownerAddress: string }[],
+    context: BulkOperationContext
+  ): Promise<void> {
+    const errors: BulkOperationError[] = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      if (context.cancellationToken.cancelled) {
+        throw new Error('Operation cancelled');
+      }
+
+      const request = requests[i];
+      
+      try {
+        // Verify wallet ownership
+        const wallet = await this.getWalletById(request.walletId, context.userId);
+        if (!wallet) {
+          throw new Error(`Wallet not found: ${request.walletId}`);
+        }
+
+        await this.removeOwner(request.walletId, request.ownerAddress);
+      } catch (error) {
+        errors.push({
+          item: request,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          code: 'OWNER_REMOVE_FAILED',
+          index: i
+        });
+      }
+    }
+
+    if (errors.length > 0 && errors.length === requests.length) {
+      throw new Error(`All remove owner operations failed: ${errors.map(e => e.error).join(', ')}`);
+    }
+  }
+
+  /**
+   * Validate bulk wallet creation requests
+   */
+  validateBulkCreateRequests(requests: BulkCreateWalletRequest[]): string[] {
+    const errors: string[] = [];
+
+    requests.forEach((request, index) => {
+      const itemErrors: string[] = [];
+
+      if (!request.name || request.name.trim().length === 0) {
+        itemErrors.push('Name is required');
+      }
+
+      if (!request.owners || request.owners.length === 0) {
+        itemErrors.push('At least one owner is required');
+      }
+
+      if (request.threshold && (request.threshold < 1 || request.threshold > request.owners.length)) {
+        itemErrors.push('Threshold must be between 1 and number of owners');
+      }
+
+      if (!request.recoveryAddress || request.recoveryAddress.trim().length === 0) {
+        itemErrors.push('Recovery address is required');
+      }
+
+      if (!request.recoveryDelay || request.recoveryDelay < 0) {
+        itemErrors.push('Recovery delay must be a positive number');
+      }
+
+      if (itemErrors.length > 0) {
+        errors.push(`Item ${index}: ${itemErrors.join(', ')}`);
+      }
+    });
+
+    return errors;
+  }
+
+  /**
+   * Validate bulk wallet update requests
+   */
+  validateBulkUpdateRequests(requests: BulkUpdateWalletRequest[]): string[] {
+    const errors: string[] = [];
+
+    requests.forEach((request, index) => {
+      const itemErrors: string[] = [];
+
+      if (!request.id || request.id.trim().length === 0) {
+        itemErrors.push('Wallet ID is required');
+      }
+
+      if (request.threshold !== undefined && request.threshold < 1) {
+        itemErrors.push('Threshold must be at least 1');
+      }
+
+      if (request.recoveryDelay !== undefined && request.recoveryDelay < 0) {
+        itemErrors.push('Recovery delay must be a positive number');
+      }
+
+      if (itemErrors.length > 0) {
+        errors.push(`Item ${index}: ${itemErrors.join(', ')}`);
+      }
+    });
+
+    return errors;
   }
 }

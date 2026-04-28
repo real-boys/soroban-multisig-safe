@@ -26,7 +26,7 @@ import analyticsRoutes from '@/routes/analytics';
 import healthRoutes from '@/routes/health';
 import tokenRoutes from '@/routes/token';
 import eventIndexerRoutes from '@/routes/eventIndexer';
-import taskRoutes from '@/routes/tasks';
+import bulkOperationsRoutes from '@/routes/bulkOperations';
 
 // Socket handlers
 import { setupSocketHandlers } from '@/services/socketService';
@@ -37,16 +37,7 @@ import { IndexerHealthChecker } from '@/services/IndexerHealthChecker';
 import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
-import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
-import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
-import { RateLimitQueueService } from '@/services/RateLimitQueueService';
-
-// Task Management Services
-import { taskSchedulerService } from '@/services/TaskSchedulerService';
-import { distributedExecutionService } from '@/services/DistributedExecutionService';
-import { taskFailureHandlerService } from '@/services/TaskFailureHandlerService';
-import { taskMonitoringService } from '@/services/TaskMonitoringService';
-import { taskHandlerIntegration } from '@/services/TaskHandlerIntegration';
+import { WebSocketService } from '@/services/WebSocketService';
 
 dotenv.config();
 
@@ -87,7 +78,10 @@ app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/token', tokenRoutes);
 app.use('/api/events', eventIndexerRoutes);
-app.use('/api/tasks', taskRoutes);
+app.use('/api/bulk', bulkOperationsRoutes);
+
+// Initialize WebSocket service for bulk operations
+const webSocketService = new WebSocketService(server);
 
 // Socket.io setup
 setupSocketHandlers(io);
