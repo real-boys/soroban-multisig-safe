@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
 import { circuitBreakerService } from '@/services/CircuitBreakerService';
 import { enhancedRPCService } from '@/services/EnhancedRPCService';
+import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
 import { logger } from '@/utils/logger';
 
 /**
@@ -375,6 +376,104 @@ export const resetRPCProviders = async (req: Request, res: Response): Promise<vo
       error: {
         code: 'INTERNAL_ERROR',
         message: 'Failed to reset RPC providers',
+      },
+    });
+  }
+};
+
+/**
+ * Get comprehensive circuit breaker health report
+ */
+export const getCircuitBreakerHealthReport = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const report = circuitBreakerMonitorService.getHealthReport();
+
+    res.json({
+      success: true,
+      data: report,
+    });
+  } catch (error) {
+    logger.error('Error getting circuit breaker health report:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Failed to retrieve health report',
+      },
+    });
+  }
+};
+
+/**
+ * Get circuit breaker metrics (for Prometheus, etc.)
+ */
+export const getCircuitBreakerMetrics = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const metrics = circuitBreakerMonitorService.getMetrics();
+
+    res.json({
+      success: true,
+      data: metrics,
+    });
+  } catch (error) {
+    logger.error('Error getting circuit breaker metrics:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Failed to retrieve metrics',
+      },
+    });
+  }
+};
+
+/**
+ * Get circuit breaker alert history
+ */
+export const getCircuitBreakerAlerts = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 100;
+    const alerts = circuitBreakerMonitorService.getAlertHistory(limit);
+
+    res.json({
+      success: true,
+      data: {
+        alerts,
+        count: alerts.length,
+      },
+    });
+  } catch (error) {
+    logger.error('Error getting circuit breaker alerts:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Failed to retrieve alerts',
+      },
+    });
+  }
+};
+
+/**
+ * Clear circuit breaker alert history
+ */
+export const clearCircuitBreakerAlerts = async (req: Request, res: Response): Promise<void> => {
+  try {
+    circuitBreakerMonitorService.clearAlertHistory();
+
+    res.json({
+      success: true,
+      data: {
+        message: 'Alert history cleared successfully',
+      },
+    });
+  } catch (error) {
+    logger.error('Error clearing circuit breaker alerts:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Failed to clear alerts',
       },
     });
   }
