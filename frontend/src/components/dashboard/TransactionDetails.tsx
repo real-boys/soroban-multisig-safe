@@ -20,7 +20,7 @@ const TransactionDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { getTransaction } = useTransactions();
-  const { kit, publicKey } = useWallet();
+  const { publicKey, signTx } = useWallet();
 
   const transaction = getTransaction(id || '');
 
@@ -30,17 +30,13 @@ const TransactionDetails: React.FC = () => {
 
   const progressPercentage = (transaction.signatures / transaction.threshold) * 100;
   const isPending = transaction.status === 'pending';
-
-  // Check if the currently connected user has already signed
-  // Mock scenario: If no wallet connected, they obviously haven't signed
   const userHasSigned = publicKey ? transaction.signedBy.includes(publicKey) : false;
 
   const handleApprove = async () => {
-    if (!kit || !publicKey) return alert('Please connect your wallet.');
+    if (!publicKey) return alert('Please connect your wallet.');
     try {
-      // Placeholder for actual Soroban transaction signing logic
       const mockXdr = 'AAAAAgAAAA...';
-      await kit.signTx({ xdr: mockXdr });
+      await signTx(mockXdr);
       alert('Successfully signed the proposal!');
     } catch (e) {
       console.error(e);
@@ -49,9 +45,8 @@ const TransactionDetails: React.FC = () => {
   };
 
   const handleReject = async () => {
-    if (!kit || !publicKey) return alert('Please connect your wallet.');
+    if (!publicKey) return alert('Please connect your wallet.');
     if (window.confirm('Are you sure you want to reject/cancel this proposal?')) {
-      // Placeholder for cancellation logic
       alert('Proposal cancelled.');
     }
   };
@@ -81,7 +76,9 @@ const TransactionDetails: React.FC = () => {
             </Grid>
             <Grid item xs={12} sm={6}>
               <Typography color="text.secondary" variant="subtitle2">Amount</Typography>
-              <Typography variant="body1" color="primary" fontWeight="bold">{transaction.amount} XLM</Typography>
+              <Typography variant="body1" color="primary" fontWeight="bold">
+                {transaction.amount} XLM
+              </Typography>
             </Grid>
           </Grid>
 
@@ -92,33 +89,44 @@ const TransactionDetails: React.FC = () => {
                 {transaction.signatures} / {transaction.threshold} Signed
               </Typography>
             </Stack>
-            <LinearProgress variant="determinate" value={progressPercentage} sx={{ height: 10, borderRadius: 5 }} />
+            <LinearProgress
+              variant="determinate"
+              value={progressPercentage}
+              sx={{ height: 10, borderRadius: 5 }}
+            />
           </Box>
 
           {isPending && (
-            < {!userHasSigned && (
+            <>
+              {!userHasSigned && (
                 <Typography variant="body2" color="warning.main" sx={{ mb: 2, fontWeight: 'bold' }}>
                   ⚠️ This transaction requires your signature!
                 </Typography>
               )}
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <Button 
-                  variant="contained" 
-                  color="success" 
-                  onClick={handleApprove} 
+                <Button
+                  variant="contained"
+                  color="success"
+                  onClick={handleApprove}
                   fullWidth
-                  sx={!userHasSigned ? {
-                    animation: 'pulse 2s infinite',
-                    '@keyframes pulse': {
-                      '0%': { boxShadow: '0 0 0 0 rgba(46, 125, 50, 0.7)' },
-                      '70%': { boxShadow: '0 0 0 10px rgba(46, 125, 50, 0)' },
-                      '100%': { boxShadow: '0 0 0 0 rgba(46, 125, 50, 0)' },
-                    }
-                  } : {}}
+                  sx={
+                    !userHasSigned
+                      ? {
+                          animation: 'pulse 2s infinite',
+                          '@keyframes pulse': {
+                            '0%': { boxShadow: '0 0 0 0 rgba(46, 125, 50, 0.7)' },
+                            '70%': { boxShadow: '0 0 0 10px rgba(46, 125, 50, 0)' },
+                            '100%': { boxShadow: '0 0 0 0 rgba(46, 125, 50, 0)' },
+                          },
+                        }
+                      : {}
+                  }
                 >
                   {userHasSigned ? 'Sign Again (Add Weight)' : 'Approve / Sign'}
                 </Button>
-                <Button variant="outlined" color="error" onClick={handleReject} fullWidth>Reject / Cancel</Button>
+                <Button variant="outlined" color="error" onClick={handleReject} fullWidth>
+                  Reject / Cancel
+                </Button>
               </Stack>
             </>
           )}
@@ -127,4 +135,5 @@ const TransactionDetails: React.FC = () => {
     </Box>
   );
 };
+
 export default TransactionDetails;

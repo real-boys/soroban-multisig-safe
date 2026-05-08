@@ -4,15 +4,13 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
-import jwt from 'jsonwebtoken';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 
 import { logger } from '@/utils/logger';
 import { errorHandler } from '@/middleware/errorHandler';
-import { rateLimiter, userRateLimiter } from '@/middleware/rateLimiter';
-import { authMiddleware } from '@/middleware/auth';
-import { apiVersioning, CURRENT_VERSION } from '@/middleware/apiVersioning';
+import { rateLimiter } from '@/middleware/rateLimiter';
+import { apiVersioning } from '@/middleware/apiVersioning';
 import { connectDatabase, prisma } from '@/config/database';
 import { connectRedis } from '@/config/redis';
 
@@ -38,6 +36,14 @@ import { SyncLagAlertService } from '@/services/SyncLagAlertService';
 import { DatabaseBackupService } from '@/services/DatabaseBackupService';
 import { ResourceMonitor } from '@/services/ResourceMonitor';
 import { WebSocketService } from '@/services/WebSocketService';
+import { distributedExecutionService } from '@/services/DistributedExecutionService';
+import { taskSchedulerService } from '@/services/TaskSchedulerService';
+import { taskMonitoringService } from '@/services/TaskMonitoringService';
+import { taskFailureHandlerService } from '@/services/TaskFailureHandlerService';
+import { taskHandlerIntegration } from '@/services/TaskHandlerIntegration';
+import { deadLetterQueueService } from '@/services/DeadLetterQueueService';
+import { circuitBreakerMonitorService } from '@/services/CircuitBreakerMonitorService';
+import { RateLimitQueueService } from '@/services/RateLimitQueueService';
 
 dotenv.config();
 
@@ -76,12 +82,16 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/health', healthRoutes);
 app.use('/api/token', tokenRoutes);
 app.use('/api/events', eventIndexerRoutes);
 app.use('/api/bulk', bulkOperationsRoutes);
 
 // Initialize WebSocket service for bulk operations
 const webSocketService = new WebSocketService(server);
+
+// Initialize RateLimitQueueService (no singleton export)
+const rateLimitQueueService = new RateLimitQueueService();
 
 // Socket.io setup
 setupSocketHandlers(io);

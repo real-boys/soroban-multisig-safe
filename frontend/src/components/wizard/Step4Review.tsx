@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Typography, List, ListItem, ListItemText, Divider, Paper } from '@mui/material';
-import { Signer } from './CreateSafeWizard';
+import { Signer } from '../../types/transaction';
 
 interface Step4ReviewProps {
   signers: Signer[];

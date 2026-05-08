@@ -1,13 +1,13 @@
 import React from 'react';
 import { useWallet } from '../../hooks/useWallet';
-import { Network } from '@stellar/wallet-kit';
+import { Network } from '../../contexts/WalletContext';
 import { ToggleButton, ToggleButtonGroup } from '@mui/material';
 
 const NetworkSwitcher: React.FC = () => {
   const { network, setNetwork } = useWallet();
 
   const handleNetworkChange = (
-    event: React.MouseEvent<HTMLElement>,
+    _event: React.MouseEvent<HTMLElement>,
     newNetwork: Network | null
   ) => {
     if (newNetwork !== null) {
@@ -23,8 +23,8 @@ const NetworkSwitcher: React.FC = () => {
       onChange={handleNetworkChange}
       aria-label="Network"
     >
-      <ToggleButton value={Network.TESTNET}>Testnet</ToggleButton>
-      <ToggleButton value={Network.MAINNET}>Mainnet</ToggleButton>
+      <ToggleButton value="TESTNET">Testnet</ToggleButton>
+      <ToggleButton value="MAINNET">Mainnet</ToggleButton>
     </ToggleButtonGroup>
   );
 };

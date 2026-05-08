@@ -1,16 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Stepper, Step, StepLabel, Button, Typography, Container } from '@mui/material';
 import { useWallet } from '../../hooks/useWallet';
+import { Signer } from '../../types/transaction';
 import Step1Signers from './Step1Signers';
 import Step2Threshold from './Step2Threshold';
 import Step3Recovery from './Step3Recovery';
 import Step4Review from './Step4Review';
 import SuccessScreen from './SuccessScreen';
-
-export interface Signer {
-  name: string;
-  publicKey: string;
-}
 
 const steps = ['Add Signers', 'Set Threshold', 'Configure Recovery', 'Review & Deploy'];
 
@@ -20,25 +16,19 @@ const CreateSafeWizard: React.FC = () => {
   const [signers, setSigners] = useState<Signer[]>([]);
   const [threshold, setThreshold] = useState(1);
   const [recoveryAddress, setRecoveryAddress] = useState('');
-  const [recoveryDelay, setRecoveryDelay] = useState(30); // in days
+  const [recoveryDelay, setRecoveryDelay] = useState(30);
   const [newContractId, setNewContractId] = useState('');
 
   useEffect(() => {
-    // Pre-fill the first signer with the connected user's wallet
     if (publicKey && signers.length === 0) {
-      setSigners([{ name: 'Me', publicKey: publicKey }]);
+      setSigners([{ name: 'Me', publicKey }]);
     }
   }, [publicKey, signers.length]);
 
   const isUserKeyIncluded = signers.some((s) => s.publicKey === publicKey);
 
-  const handleNext = () => {
-    setActiveStep((prevActiveStep) => prevActiveStep + 1);
-  };
-
-  const handleBack = () => {
-    setActiveStep((prevActiveStep) => prevActiveStep - 1);
-  };
+  const handleNext = () => setActiveStep((prev) => prev + 1);
+  const handleBack = () => setActiveStep((prev) => prev - 1);
 
   const handleReset = () => {
     setActiveStep(0);
@@ -55,11 +45,7 @@ const CreateSafeWizard: React.FC = () => {
         return <Step1Signers signers={signers} setSigners={setSigners} userPublicKey={publicKey} />;
       case 1:
         return (
-          <Step2Threshold
-            threshold={threshold}
-            setThreshold={setThreshold}
-            numSigners={signers.length}
-          />
+          <Step2Threshold threshold={threshold} setThreshold={setThreshold} numSigners={signers.length} />
         );
       case 2:
         return (
@@ -82,13 +68,6 @@ const CreateSafeWizard: React.FC = () => {
       default:
         return 'Unknown step';
     }
-  };
-
-  const isNextDisabled = () => {
-    if (activeStep === 0) {
-      return !isUserKeyIncluded || signers.length === 0;
-    }
-    return false;
   };
 
   return (
@@ -117,7 +96,6 @@ const CreateSafeWizard: React.FC = () => {
               <Button
                 variant="contained"
                 onClick={async () => {
-                  // Mock deployment
                   await new Promise((resolve) => setTimeout(resolve, 1500));
                   const mockId = 'C' + Math.random().toString(36).substring(2, 57).toUpperCase();
                   setNewContractId(mockId);
@@ -127,7 +105,11 @@ const CreateSafeWizard: React.FC = () => {
                 Deploy
               </Button>
             ) : (
-              <Button variant="contained" onClick={handleNext} disabled={isNextDisabled()}>
+              <Button
+                variant="contained"
+                onClick={handleNext}
+                disabled={activeStep === 0 && (!isUserKeyIncluded || signers.length === 0)}
+              >
                 Next
               </Button>
             )}

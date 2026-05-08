@@ -15,3 +15,8 @@ export interface TransactionProposal {
   creator: string;
   signedBy: string[];
 }
+
+export interface Signer {
+  name: string;
+  publicKey: string;
+}

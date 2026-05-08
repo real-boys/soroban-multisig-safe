@@ -12,7 +12,7 @@ import {
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import { StrKey } from '@stellar/stellar-sdk';
-import { Signer } from './CreateSafeWizard';
+import { Signer } from '../../types/transaction';
 
 interface Step1SignersProps {
   signers: Signer[];

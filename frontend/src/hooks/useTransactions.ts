@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { TransactionProposal } from '../types/transaction';
 
-// Mock data for the dashboard
 const MOCK_TRANSACTIONS: TransactionProposal[] = [
   {
     id: 'prop-1',
@@ -10,8 +9,8 @@ const MOCK_TRANSACTIONS: TransactionProposal[] = [
     amount: '5000',
     title: 'Monthly Server Costs',
     description: 'Payment for AWS hosting for the month of October.',
-    createdAt: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
-    expiresAt: new Date(Date.now() + 86400000 * 2).toISOString(), // 2 days from now
+    createdAt: new Date(Date.now() - 86400000).toISOString(),
+    expiresAt: new Date(Date.now() + 86400000 * 2).toISOString(),
     status: 'pending',
     signatures: 2,
     threshold: 3,
@@ -26,7 +25,7 @@ const MOCK_TRANSACTIONS: TransactionProposal[] = [
     title: 'Marketing Campaign',
     description: 'Funds for the upcoming Q4 marketing push.',
     createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-    expiresAt: new Date(Date.now() - 86400000).toISOString(), // Expired
+    expiresAt: new Date(Date.now() - 86400000).toISOString(),
     status: 'expired',
     signatures: 1,
     threshold: 3,
@@ -57,28 +56,17 @@ export const useTransactions = () => {
   const [loading, setLoading] = useState<boolean>(true);
 
   const fetchTransactions = useCallback(async () => {
-    // Requirement: Real-time updates via Horizon/Soroban RPC polling
-    // TODO: Replace with actual backend/RPC call: await axios.get('/api/transactions')
-    
-    // Simulating network delay
-    // setTransactions(fetchedData);
+    // TODO: Replace with actual backend call: await axios.get('/api/transactions')
     setLoading(false);
   }, []);
 
-  // Setup polling
   useEffect(() => {
     fetchTransactions();
-    
-    // Poll every 10 seconds for real-time updates
     const intervalId = setInterval(fetchTransactions, 10000);
     return () => clearInterval(intervalId);
   }, [fetchTransactions]);
 
-  const getTransaction = (id: string) => transactions.find(t => t.id === id);
+  const getTransaction = (id: string) => transactions.find((t) => t.id === id);
 
-  return {
-    transactions,
-    loading,
-    getTransaction,
-  };
+  return { transactions, loading, getTransaction };
 };
