@@ -1,251 +1,180 @@
 # Multi-Sig Safe with Time-Lock Recovery (Stellar)
 
-A comprehensive multi-signature wallet solution built on Stellar with time-lock recovery mechanisms, featuring a full-stack application for secure digital asset management.
+A multi-signature wallet solution built on Stellar/Soroban with time-lock recovery, featuring a full-stack application for secure digital asset management.
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
-stellar-multisig-safe/
-├── 📁 contracts/              # Stellar smart contracts
-│   ├── 📁 soroban/           # Soroban Rust contracts
-│   └── 📁 wasm/              # Compiled WASM contracts
-├── 📁 backend/               # Node.js API server
-│   ├── 📁 src/
-│   ├── 📁 tests/
-│   └── 📁 docs/
-├── 📁 frontend/              # React frontend application
-│   ├── 📁 src/
-│   ├── 📁 public/
-│   └── 📁 tests/
-├── 📁 docs/                  # Project documentation
-├── 📁 scripts/               # Development and deployment scripts
-├── 📁 .github/               # GitHub workflows and templates
-└── 📁 tools/                 # Development tools and utilities
+soroban-multisig-safe/
+├── contracts/              # Stellar smart contracts
+│   └── soroban/           # Soroban Rust contracts (lib.rs, treasury.rs, etc.)
+├── backend/               # Node.js/Express API server (TypeScript)
+│   ├── src/
+│   │   ├── controllers/
+│   │   ├── services/
+│   │   ├── routes/
+│   │   ├── middleware/
+│   │   ├── config/
+│   │   ├── types/
+│   │   └── tests/
+│   └── prisma/            # Database schema and migrations
+├── frontend/              # React/Vite frontend (TypeScript)
+│   └── src/
+│       ├── components/
+│       ├── pages/
+│       ├── services/
+│       ├── hooks/
+│       ├── contexts/
+│       └── types/
+├── docs/                  # Project documentation
+├── scripts/               # Deployment and utility scripts
+├── nginx/                 # Nginx reverse proxy config
+├── elk/                   # ELK stack config (logging)
+└── .github/               # CI/CD workflows and issue templates
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
+
 - Node.js 18+
 - Rust 1.70+
-- Docker (optional)
-- Git
+- Docker (for PostgreSQL and Redis)
 
-### Installation
+### Setup
 
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd stellar-multisig-safe
+cd soroban-multisig-safe
 
-# Install dependencies for all components
+# Install all dependencies
 npm run install:all
 
-# Set up environment variables
+# Copy and configure environment variables
 cp .env.example .env
-# Edit .env with your configuration
+# Edit .env with your database, Redis, and Stellar config
 
-# Start development environment
+# Start development environment (all services)
 npm run dev
 ```
 
-## 📋 Available Scripts
+### Database Setup
 
-### Root Level Commands
 ```bash
-npm run install:all          # Install dependencies for all packages
-npm run dev                  # Start all services in development mode
-npm run build                # Build all packages
-npm run test                 # Run all tests
-npm run lint                 # Lint all packages
-npm run clean                # Clean build artifacts
+cd backend
+npx prisma migrate dev   # Run migrations
+npx prisma generate      # Generate Prisma client
 ```
+
+### Local Stellar Network (optional)
+
+```bash
+docker run -d --name stellar-local -p 8000:8000 stellar/quickstart:latest
+```
+
+## Available Scripts
+
+### Root
+
+| Command | Description |
+|---|---|
+| `npm run install:all` | Install dependencies for all packages |
+| `npm run dev` | Start all services concurrently |
+| `npm run build` | Build all packages |
+| `npm run test` | Run all tests |
+| `npm run lint` | Lint all packages |
 
 ### Smart Contracts
-```bash
-npm run contract:build       # Build Stellar contracts
-npm run contract:test        # Run contract tests
-npm run contract:deploy      # Deploy to testnet
-npm run contract:optimize    # Optimize WASM contracts
-```
+
+| Command | Description |
+|---|---|
+| `npm run contract:build` | Build WASM contracts |
+| `npm run contract:test` | Run contract tests |
+| `npm run contract:deploy` | Deploy to testnet |
+| `npm run contract:lint` | Run clippy |
 
 ### Backend
-```bash
-npm run backend:dev          # Start backend in development mode
-npm run backend:build        # Build backend for production
-npm run backend:test         # Run backend tests
-npm run backend:lint         # Lint backend code
-```
+
+| Command | Description |
+|---|---|
+| `npm run backend:dev` | Start backend in dev mode |
+| `npm run backend:build` | Build for production |
+| `npm run backend:test` | Run tests |
 
 ### Frontend
-```bash
-npm run frontend:dev         # Start frontend in development mode
-npm run frontend:build       # Build frontend for production
-npm run frontend:test        # Run frontend tests
-npm run frontend:lint        # Lint frontend code
-```
 
-## 🛠️ Development Workflow
+| Command | Description |
+|---|---|
+| `npm run frontend:dev` | Start frontend dev server |
+| `npm run frontend:build` | Build for production |
+| `npm run frontend:test` | Run tests |
 
-### 1. Setting Up Your Development Environment
+## Architecture
 
-```bash
-# Install Rust and Soroban CLI
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-cargo install soroban-cli
+### Smart Contracts (Rust/Soroban)
 
-# Install Node.js dependencies
-npm run install:all
+- **MultiSig**: Core multi-signature logic with configurable threshold
+- **TimeLock**: Time-delayed recovery mechanisms
+- **Treasury**: Treasury management with spending limits
+- **Escrow, Staking, Vesting**: Additional DeFi primitives
 
-# Start local Stellar network
-docker run -d --name stellar -p 8000:8000 stellar/quickstart:latest
-```
+See [docs/contracts.md](docs/contracts.md) for full contract documentation.
 
-### 2. Making Changes
+### Backend (Node.js/Express/TypeScript)
 
-1. **Smart Contracts**: Modify Rust contracts in `contracts/soroban/`
-2. **Backend API**: Update Node.js server in `backend/src/`
-3. **Frontend UI**: Update React components in `frontend/src/`
+- RESTful API with versioning (`/api/v1`, `/api/v2`)
+- PostgreSQL via Prisma ORM
+- Redis for caching and rate limiting
+- JWT authentication
+- WebSocket support (Socket.io)
+- Circuit breaker, retry logic, and exponential backoff for Stellar RPC calls
+- Distributed task scheduling
 
-### 3. Testing Your Changes
+### Frontend (React/TypeScript/Vite)
 
-```bash
-# Run all tests
-npm run test
+- Material-UI component library
+- React Query for data fetching
+- Freighter wallet integration
+- Real-time updates via WebSocket
 
-# Run specific package tests
-npm run contract:test
-npm run backend:test
-npm run frontend:test
-```
+## Technology Stack
 
-## 🤝 Contributing
+| Layer | Technologies |
+|---|---|
+| Smart Contracts | Rust, Soroban SDK, WASM |
+| Backend | Node.js, Express, TypeScript, Prisma, PostgreSQL, Redis |
+| Frontend | React, TypeScript, Vite, Material-UI, React Query |
+| DevOps | Docker, GitHub Actions, Nginx, ELK Stack |
 
-We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) for details on:
+## Environment Variables
 
-- Code of Conduct
-- Development workflow
-- Pull request process
-- Issue reporting guidelines
+Copy `.env.example` to `.env`. Key variables:
 
-### How to Contribute
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `JWT_SECRET` | JWT signing secret |
+| `STELLAR_NETWORK` | `futurenet`, `testnet`, or `mainnet` |
+| `STELLAR_RPC_URL` | Stellar RPC endpoint |
+| `CONTRACT_ID` | Deployed contract address |
 
-1. **Fork** the repository
-2. **Create** a feature branch: `git checkout -b feature/amazing-feature`
-3. **Make** your changes following our coding standards
-4. **Test** your changes thoroughly
-5. **Commit** your changes with descriptive messages
-6. **Push** to your fork and submit a **Pull Request**
+## Contributing
 
-## 📝 Issues and Project Management
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, coding standards, and PR process.
 
 ### Issue Templates
 
-We provide templates for different types of issues:
+- [Bug Report](.github/ISSUE_TEMPLATE/bug_report.md)
+- [Feature Request](.github/ISSUE_TEMPLATE/feature_request.md)
+- [Security Issue](.github/ISSUE_TEMPLATE/security_issue.md)
+- [Documentation](.github/ISSUE_TEMPLATE/documentation.md)
 
-- **Bug Report**: [`bug_report.md`](.github/ISSUE_TEMPLATE/bug_report.md)
-- **Feature Request**: [`feature_request.md`](.github/ISSUE_TEMPLATE/feature_request.md)
-- **Security Issue**: [`security_issue.md`](.github/ISSUE_TEMPLATE/security_issue.md)
-- **Documentation**: [`documentation.md`](.github/ISSUE_TEMPLATE/documentation.md)
+## Documentation
 
-### Project Boards
+- [Contract Guide](docs/contracts.md)
 
-- **Backlog**: Features and improvements to be prioritized
-- **In Progress**: Currently being worked on
-- **Review**: Ready for code review
-- **Done**: Completed and merged
+## License
 
-### Labels
-
-- `bug`: Bug reports and fixes
-- `enhancement`: New features and improvements
-- `documentation`: Documentation updates
-- `good first issue`: Good for new contributors
-- `help wanted`: Community help needed
-- `priority/high`: High priority issues
-- `security`: Security-related issues
-
-## 🏗️ Architecture Overview
-
-### Smart Contracts (Stellar/Soroban)
-- **MultiSig Contract**: Core multi-signature logic
-- **TimeLock Contract**: Time-delayed recovery mechanisms
-- **Recovery Contract**: Emergency recovery procedures
-
-### Backend API (Node.js/Express)
-- **RESTful API**: Endpoints for wallet operations
-- **Stellar Integration**: Contract interaction and transaction handling
-- **Database**: PostgreSQL for persistent data storage
-- **Authentication**: JWT-based user authentication
-
-### Frontend (React/TypeScript)
-- **Modern UI**: Responsive design with Material-UI
-- **Wallet Interface**: Multi-signature transaction management
-- **Real-time Updates**: WebSocket integration for live updates
-- **Security**: Secure key management and transaction signing
-
-## 🔧 Technology Stack
-
-### Smart Contracts
-- **Rust**: Contract development language
-- **Soroban**: Stellar smart contract platform
-- **WASM**: WebAssembly compilation target
-
-### Backend
-- **Node.js**: Runtime environment
-- **Express.js**: Web framework
-- **TypeScript**: Type-safe JavaScript
-- **PostgreSQL**: Database
-- **Prisma**: ORM
-- **Stellar SDK**: Stellar blockchain integration
-
-### Frontend
-- **React**: UI framework
-- **TypeScript**: Type-safe development
-- **Material-UI**: Component library
-- **React Router**: Navigation
-- **Axios**: HTTP client
-- **React Query**: Data fetching and caching
-
-### Development Tools
-- **ESLint**: Code linting
-- **Prettier**: Code formatting
-- **Jest**: Testing framework
-- **Docker**: Containerization
-- **GitHub Actions**: CI/CD
-
-## 🔒 Security Considerations
-
-- **Multi-signature**: No single point of failure
-- **Time-locks**: Prevents rapid unauthorized changes
-- **Key Management**: Secure key storage and handling
-- **Audit Trail**: Complete transaction history
-- **Input Validation**: Comprehensive input sanitization
-
-## 📚 Documentation
-
-- [API Documentation](docs/api.md)
-- [Smart Contract Guide](docs/contracts.md)
-- [Frontend Development](docs/frontend.md)
-- [Deployment Guide](docs/deployment.md)
-- [Security Best Practices](docs/security.md)
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- Stellar Development Foundation for the Soroban platform
-- OpenZeppelin for security best practices
-- The multi-sig community for inspiration and feedback
-
-## 📞 Support
-
-- **Discord**: [Join our community](https://discord.gg/your-server)
-- **GitHub Issues**: [Report issues](https://github.com/your-repo/issues)
-- **Documentation**: [Read the docs](https://your-docs-site.com)
-
----
-
-**Built with ❤️ for the Stellar ecosystem**
+MIT — see [LICENSE](LICENSE).

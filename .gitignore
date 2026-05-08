@@ -114,8 +114,9 @@ Thumbs.db
 tmp/
 temp/
 
-# Prisma
-prisma/migrations/
+# Prisma - keep migrations in version control
+prisma/migrations/dev.db
+prisma/migrations/dev.db-journal
 
 # Docker
 .dockerignore
